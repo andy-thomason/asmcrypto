@@ -452,123 +452,13 @@ impl U256 {
 // Widening 256×256 → 512-bit multiply
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Schoolbook multiplication producing an 8-limb (512-bit) result.
-/// 256×256→512-bit schoolbook multiply using MULX + ADCX/ADOX (ADX extension).
+/// Schoolbook 256×256→512-bit multiply using `u128` limbs.
 ///
-/// Two independent carry chains — CF (ADCX) and OF (ADOX) — let each row's
-/// partial products and their carries pipeline concurrently, instead of the
-/// serialised MUL/ADD/ADC sequence produced from the generic Rust loop.
-///
-/// Register map across the four rows:
-///   r8=R[0]  r10=R[1]  r12=R[2]  r14=R[3]
-///   r15=R[4] r11=R[5]  rcx=R[6]  rdi=R[7]
-///   r9, r13 = hi / lo temporaries; rdx = b[i]; rax = 0
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "bmi2",
-    target_feature = "adx"
-))]
-#[target_feature(enable = "bmi2,adx")]
-unsafe fn mul_wide_adx(a: &U256, b: &U256) -> [u64; 8] {
-    let (r0, r1, r2, r3, r4, r5, r6, r7);
-    // SAFETY: caller guarantees BMI2 and ADX are available (enforced by cfg guard).
-    unsafe {
-        core::arch::asm!(
-            // rax = 0 throughout (drains stray carries)
-            "xor eax, eax",
-
-            // ── ROW 0: rdx = b[0] ────────────────────────────────────────────────
-            "mov rdx, [{bp}]",
-            "mulx r9,  r8,  [{ap}]",        // r8  = lo(a0·b0), r9  = hi
-            "mulx r11, r10, [{ap}+8]",      // r10 = lo(a1·b0), r11 = hi
-            "mulx r13, r12, [{ap}+16]",     // r12 = lo(a2·b0), r13 = hi
-            "mulx r15, r14, [{ap}+24]",     // r14 = lo(a3·b0), r15 = hi → R[4]
-            // Chain hi values into the next column (plain ADD: no prior data to merge)
-            "add  r10, r9",                 // R[1] CF
-            "adc  r12, r11",                // R[2] CF
-            "adc  r14, r13",                // R[3] CF
-            "adc  r15, rax",                // R[4] = hi(a3·b0) + CF  (rax=0)
-            "xor r11d, r11d",               // R[5] = r11 = 0
-
-            // ── ROW 1: rdx = b[1] ────────────────────────────────────────────────
-            "mov rdx, [{bp}+8]",
-            "xor eax, eax",                 // CF=0, OF=0, rax=0
-            "mulx r9, r13, [{ap}]",
-            "adcx r10, r13",                // R[1] += lo(a0·b1), CF
-            "adox r12, r9",                 // R[2] += hi(a0·b1), OF
-            "mulx r9, r13, [{ap}+8]",
-            "adcx r12, r13",                // R[2] += lo(a1·b1), CF
-            "adox r14, r9",                 // R[3] += hi, OF
-            "mulx r9, r13, [{ap}+16]",
-            "adcx r14, r13",                // R[3] += lo, CF
-            "adox r15, r9",                 // R[4] += hi, OF
-            "mulx r9, r13, [{ap}+24]",
-            "adcx r15, r13",                // R[4] += lo, CF
-            "adox r11, r9",                 // R[5] += hi, OF  (r11 was 0)
-            "adcx r11, rax",                // drain CF
-            "adox r11, rax",                // drain OF
-            "xor ecx, ecx",                 // R[6] = rcx = 0
-
-            // ── ROW 2: rdx = b[2] ────────────────────────────────────────────────
-            "mov rdx, [{bp}+16]",
-            "xor eax, eax",
-            "mulx r9, r13, [{ap}]",
-            "adcx r12, r13",                // R[2] += lo, CF
-            "adox r14, r9",                 // R[3] += hi, OF
-            "mulx r9, r13, [{ap}+8]",
-            "adcx r14, r13",                // R[3] += lo, CF
-            "adox r15, r9",                 // R[4] += hi, OF
-            "mulx r9, r13, [{ap}+16]",
-            "adcx r15, r13",                // R[4] += lo, CF
-            "adox r11, r9",                 // R[5] += hi, OF
-            "mulx r9, r13, [{ap}+24]",
-            "adcx r11, r13",                // R[5] += lo, CF
-            "adox rcx, r9",                 // R[6] += hi, OF  (rcx was 0)
-            "adcx rcx, rax",                // drain CF
-            "adox rcx, rax",                // drain OF
-            "xor edi, edi",                 // R[7] = rdi = 0  (also clears CF, OF)
-
-            // ── ROW 3: rdx = b[3] ────────────────────────────────────────────────
-            "mov rdx, [{bp}+24]",
-            "xor eax, eax",
-            "mulx r9, r13, [{ap}]",
-            "adcx r14, r13",                // R[3] += lo, CF
-            "adox r15, r9",                 // R[4] += hi, OF
-            "mulx r9, r13, [{ap}+8]",
-            "adcx r15, r13",                // R[4] += lo, CF
-            "adox r11, r9",                 // R[5] += hi, OF
-            "mulx r9, r13, [{ap}+16]",
-            "adcx r11, r13",                // R[5] += lo, CF
-            "adox rcx, r9",                 // R[6] += hi, OF
-            "mulx r9, r13, [{ap}+24]",
-            "adcx rcx, r13",                // R[6] += lo, CF
-            "adox rdi, r9",                 // R[7] += hi, OF  (rdi was 0)
-            "adcx rdi, rax",                // drain final CF
-            "adox rdi, rax",                // drain final OF
-
-            ap  = in(reg) a.0.as_ptr(),
-            bp  = in(reg) b.0.as_ptr(),
-            out("r8")  r0,
-            out("r10") r1,
-            out("r12") r2,
-            out("r14") r3,
-            out("r15") r4,
-            out("r11") r5,
-            out("rcx") r6,
-            out("rdi") r7,
-            out("r9")  _,
-            out("r13") _,
-            out("rax") _,
-            out("rdx") _,
-            options(nostack),
-        );
-    } // end unsafe asm
-    [r0, r1, r2, r3, r4, r5, r6, r7]
-}
-
-/// 256×256→512-bit schoolbook multiply — generic fallback.
+/// With `target-cpu=native` LLVM already emits MULX/ADCX/ADOX here, matching
+/// or beating a hand-written ADX kernel (which cannot be `#[inline(always)]`
+/// due to Rust issue #145574 and therefore carries call overhead).
 #[inline(always)]
-fn mul_wide_generic(a: &U256, b: &U256) -> [u64; 8] {
+fn mul_wide(a: &U256, b: &U256) -> [u64; 8] {
     let mut r = [0u64; 8];
     for i in 0..4 {
         let mut carry = 0u128;
@@ -580,21 +470,6 @@ fn mul_wide_generic(a: &U256, b: &U256) -> [u64; 8] {
         r[i + 4] += carry as u64;
     }
     r
-}
-
-/// Dispatch: use the ADX version when the CPU supports BMI2 + ADX, otherwise fall back.
-#[inline(always)]
-fn mul_wide(a: &U256, b: &U256) -> [u64; 8] {
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "bmi2",
-        target_feature = "adx"
-    ))]
-    // SAFETY: cfg guards guarantee BMI2 and ADX are available at compile time.
-    return unsafe { mul_wide_adx(a, b) };
-
-    #[allow(unreachable_code)]
-    mul_wide_generic(a, b)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1458,22 +1333,10 @@ pub fn recover_address(hash: &[u8; 32], r: &[u8; 32], s: &[u8; 32], v: u8) -> Op
 // Thin public wrappers over the private multiply kernels so that the benches/
 // crate can call them without U256 being part of the public API.
 
-/// 256×256→512 using the generic schoolbook loop.
+/// 256×256→512 schoolbook multiply.
 #[doc(hidden)]
-pub fn bench_mul_wide_generic(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
-    mul_wide_generic(&U256(a), &U256(b))
-}
-
-/// 256×256→512 using the ADX MULX/ADCX/ADOX path.
-#[doc(hidden)]
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "bmi2",
-    target_feature = "adx"
-))]
-pub fn bench_mul_wide_adx(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
-    // SAFETY: cfg guard ensures BMI2 + ADX are present.
-    unsafe { mul_wide_adx(&U256(a), &U256(b)) }
+pub fn bench_mul_wide(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
+    mul_wide(&U256(a), &U256(b))
 }
 
 /// Reduce a 512-bit wide product modulo the field prime p (Solinas reduction).

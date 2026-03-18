@@ -1,4 +1,4 @@
-use asmcrypto::ecdsa::{bench_fn_reduce_wide, bench_fp_reduce_wide, bench_mul_wide_generic};
+use asmcrypto::ecdsa::{bench_fn_reduce_wide, bench_fp_reduce_wide, bench_mul_wide};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // Two non-trivial 256-bit operands (secp256k1 field prime - 1 and group order).
@@ -39,22 +39,9 @@ const FN_WIDE: [u64; 8] = [
 
 fn bench_mul(c: &mut Criterion) {
     let mut g = c.benchmark_group("mul_wide");
-    g.bench_function("generic", |b| {
-        b.iter(|| bench_mul_wide_generic(black_box(A), black_box(B)))
+    g.bench_function("schoolbook", |b| {
+        b.iter(|| bench_mul_wide(black_box(A), black_box(B)))
     });
-
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "bmi2",
-        target_feature = "adx"
-    ))]
-    {
-        use asmcrypto::ecdsa::bench_mul_wide_adx;
-        g.bench_function("adx", |b| {
-            b.iter(|| bench_mul_wide_adx(black_box(A), black_box(B)))
-        });
-    }
-
     g.finish();
 }
 
