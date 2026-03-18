@@ -5,6 +5,7 @@
 ///   perf record -g --call-graph dwarf -F 997 -- target/release/examples/perf_mul
 ///   perf report --stdio -n
 use asmcrypto::ecdsa::{bench_fn_mul, bench_fp_mul};
+use std::time::Instant;
 
 fn main() {
     // fp_mul inputs: p-1  (maximally large field element)
@@ -35,15 +36,21 @@ fn main() {
 
     // ── fp_mul profiling loop ─────────────────────────────────────────────────
     let mut sink_fp = [0u64; 4];
+    let t0 = Instant::now();
     for _ in 0..n {
         sink_fp = bench_fp_mul(p_minus_1, p_minus_1);
     }
+    let fp_ns = t0.elapsed().as_nanos() as f64 / n as f64;
+    println!("fp_mul: {fp_ns:.2} ns/call");
 
     // ── fn_mul profiling loop ─────────────────────────────────────────────────
     let mut sink_fn = [0u64; 4];
+    let t1 = Instant::now();
     for _ in 0..n {
         sink_fn = bench_fn_mul(n_minus_1, n_minus_1);
     }
+    let fn_ns = t1.elapsed().as_nanos() as f64 / n as f64;
+    println!("fn_mul: {fn_ns:.2} ns/call");
 
     // Prevent dead-code elimination.
     if sink_fp[0] == 0xdeadbeef || sink_fn[0] == 0xdeadbeef {
