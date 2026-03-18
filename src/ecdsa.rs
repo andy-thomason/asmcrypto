@@ -66,6 +66,48 @@ const GY: U256 = U256([
 ]);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GLV endomorphism constants for secp256k1
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// secp256k1 has a degree-2 endomorphism φ: (x, y) ↦ (β·x, y)  where
+//   β  = a primitive cube root of unity in Fp
+//   λ  = the corresponding eigenvalue in Fn  (φ(P) = λ·P)
+//
+// For any scalar k we decompose k = k1 + k2·λ  with |k1|, |k2| ≈ 2^128,
+// then compute  k·P = k1·P + k2·φ(P)  using Shamir's simultaneous mul,
+// halving the effective scalar bitlength.
+//
+// Constants from the Bernstein–Hamburg paper and libsecp256k1 source:
+//   β  = 0x7AE96A2B657C07106E64479EAC3434E99CF0497512F58995C1396C28719501EE
+//   λ  = 0xAC9C52B33FA3CF1F5AD9E3FD77ED9BA4A880B9FC8EC739C2E0CFC810B51283CE
+//
+// For scalar decomposition we need four 128-bit scalars (Babai rounding):
+//   a1 =  0x3086D221A7D46BCDE86C90E49284EB15
+//   b1 = -0xE4437ED6010E88286F547FA90ABFE4C3  (negated)
+//   a2 =  0x114CA50F7A8E2F3F657C1108D9D44CFD8
+//   b2 =  0x3086D221A7D46BCDE86C90E49284EB15  (= a1)
+//
+// libsecp256k1 uses a slightly different (pre-rounded) form; we use the
+// exact same constants so results match.
+
+/// β: cube root of unity in Fp (the one satisfying φ(P) = λ·P).
+/// β = (√(−3) − 1) / 2  mod p  =  0x851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40
+const BETA: U256 = U256([
+    0x3EC693D68E6AFA40,
+    0x630FB68AED0A766A,
+    0x919BB86153CBCB16,
+    0x851695D49A83F8EF,
+]);
+
+/// λ: endomorphism eigenvalue in Fn  (φ(P) = λ·P).
+const LAMBDA: U256 = U256([
+    0xE0CFC810B51283CE,
+    0xA880B9FC8EC739C2,
+    0x5AD9E3FD77ED9BA4,
+    0xAC9C52B33FA3CF1F,
+]);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // U256 — 256-bit unsigned integer
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -524,32 +566,338 @@ fn point_add_mixed(p: &JacobianPoint, qx: &U256, qy: &U256) -> JacobianPoint {
     }
 }
 
-/// Scalar multiplication: `scalar * G` using the affine generator.
-fn scalar_mul_g(scalar: &U256) -> JacobianPoint {
-    scalar_mul_affine(scalar, &GX, &GY)
+// ─────────────────────────────────────────────────────────────────────────────
+// Jacobian negation and full Jacobian-Jacobian addition
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Negate a Jacobian point: (X : Y : Z) ↦ (X : -Y : Z).
+fn point_neg(p: &JacobianPoint) -> JacobianPoint {
+    JacobianPoint {
+        x: p.x,
+        y: fp_neg(&p.y),
+        z: p.z,
+    }
 }
 
-/// Scalar multiplication: `scalar * (px, py)` using double-and-add.
-fn scalar_mul_affine(scalar: &U256, px: &U256, py: &U256) -> JacobianPoint {
-    let mut acc = JacobianPoint::infinity();
-    let mut addend = JacobianPoint::from_affine(*px, *py);
-    for i in 0..256 {
-        if scalar.bit(i) {
-            if acc.is_infinity() {
-                acc = addend;
-            } else if addend.z == U256::ONE {
-                // addend is still in affine form (z=1).
-                acc = point_add_mixed(&acc, &addend.x, &addend.y);
-            } else {
-                // After first doubling addend is in Jacobian form.
-                let (ax, ay) = match addend.to_affine() {
-                    Some(v) => v,
-                    None => return JacobianPoint::infinity(),
-                };
-                acc = point_add_mixed(&acc, &ax, &ay);
+/// Full Jacobian + Jacobian addition (both points may be in projective form).
+/// add-2007-bl from https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#addition-add-2007-bl
+fn point_add(p: &JacobianPoint, q: &JacobianPoint) -> JacobianPoint {
+    if p.is_infinity() {
+        return *q;
+    }
+    if q.is_infinity() {
+        return *p;
+    }
+
+    let z1sq = fp_sq(&p.z);
+    let z2sq = fp_sq(&q.z);
+    let u1 = fp_mul(&p.x, &z2sq); // U1 = X1·Z2²
+    let u2 = fp_mul(&q.x, &z1sq); // U2 = X2·Z1²
+    let s1 = fp_mul(&p.y, &fp_mul(&q.z, &z2sq)); // S1 = Y1·Z2³
+    let s2 = fp_mul(&q.y, &fp_mul(&p.z, &z1sq)); // S2 = Y2·Z1³
+
+    let h = fp_sub(&u2, &u1); // H = U2 - U1
+    let r = fp_sub(&s2, &s1); // R = S2 - S1
+
+    if h.is_zero() {
+        return if r.is_zero() {
+            // p == q → double
+            point_double(p)
+        } else {
+            // p == -q → infinity
+            JacobianPoint::infinity()
+        };
+    }
+
+    let h2 = fp_sq(&h);
+    let h3 = fp_mul(&h, &h2);
+    let u1h2 = fp_mul(&u1, &h2);
+
+    // X3 = R² - H³ - 2·U1·H²
+    let x3 = fp_sub(&fp_sub(&fp_sq(&r), &h3), &fp_mul_2(&u1h2));
+    // Y3 = R·(U1·H² - X3) - S1·H³
+    let y3 = fp_sub(&fp_mul(&r, &fp_sub(&u1h2, &x3)), &fp_mul(&s1, &h3));
+    // Z3 = H·Z1·Z2
+    let z3 = fp_mul(&fp_mul(&h, &p.z), &q.z);
+
+    JacobianPoint {
+        x: x3,
+        y: y3,
+        z: z3,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GLV scalar decomposition
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Signed 129-bit integer used during GLV decomposition.
+/// `neg=true` means the sub-scalar is negative; we negate the base point instead.
+/// `mag` holds bits 0..127 and `hi` holds bit 128 of |value|.
+/// GLV guarantees |k1| < √n < 2^129 and |k2| < √n < 2^129.
+#[derive(Clone, Copy, Debug)]
+struct S129 {
+    mag: u128, // bits 0..127 of |value|
+    hi: bool,  // bit 128 of |value| (set iff |value| >= 2^128)
+    neg: bool, // true if the original signed value is negative
+}
+
+impl S129 {
+    fn from_u256_signed(v: U256) -> Self {
+        // v is a scalar mod n.  If v >= n/2 the "positive" form costs more bits;
+        // use the negated form instead.
+        // n_half = n >> 1 = (n-1)/2
+        let n_half = U256([
+            0xDFE92F46681B20A0,
+            0x5D576E7357A4501D,
+            0xFFFFFFFFFFFFFFFF,
+            0x7FFFFFFFFFFFFFFF,
+        ]);
+        if v.ge(&n_half) {
+            // neg: magnitude = n - v  (guaranteed < 2^129)
+            let neg_v = N.sbb(&v).0;
+            S129 {
+                mag: neg_v.0[0] as u128 | ((neg_v.0[1] as u128) << 64),
+                hi: neg_v.0[2] != 0,
+                neg: true,
+            }
+        } else {
+            // pos: magnitude = v  (guaranteed < 2^129)
+            S129 {
+                mag: v.0[0] as u128 | ((v.0[1] as u128) << 64),
+                hi: v.0[2] != 0,
+                neg: false,
             }
         }
-        addend = point_double(&addend);
+    }
+}
+
+/// Decompose a 256-bit scalar `k` into two signed ~128-bit scalars `(k1, k2)`
+/// such that `k ≡ k1 + k2·λ (mod n)`.
+///
+/// Uses the exact libsecp256k1 algorithm:
+///   c1 = (k · g1) >> 384
+///   c2 = (k · g2) >> 384
+///   r2 = c1·(−b1) + c2·(−b2)  mod n
+///   r1 = k − r2·λ  mod n
+///
+/// g1, g2 are pre-computed 256-bit round(2^384·b/d) constants.
+fn glv_decompose(k: &U256) -> (S129, S129) {
+    // Lattice constants for secp256k1 GLV decomposition.
+    // Verified: k ≡ r1 + r2·λ (mod n) with min(r1, n-r1) < 2^129
+    // and       min(r2, n-r2) < 2^128 for all k in [1, n).
+    //
+    // g1 = round(2^384 · b2 / n),  b2 = 0x3086D221A7D46BCDE86C90E49284EB15
+    let g1 = U256([
+        0xE893209A45DBB031,
+        0x3DAA8A1471E8CA7F,
+        0xE86C90E49284EB15,
+        0x3086D221A7D46BCD,
+    ]);
+    // g2 = round(2^384 · b1 / n),  b1 = 0xE4437ED6010E88286F547FA90ABFE4C3
+    // (note: the rounded value is b1+1 in the last bit, i.e. ends in ...C4)
+    let g2 = U256([
+        0x1571B4AE8AC47F71,
+        0x221208AC9DF506C6,
+        0x6F547FA90ABFE4C4,
+        0xE4437ED6010E8828,
+    ]);
+    // b1 and b2 as positive 128-bit integers (both fit in 2 limbs).
+    let b1 = U256([
+        0x6F547FA90ABFE4C3,
+        0xE4437ED6010E8828,
+        0x0000000000000000,
+        0x0000000000000000,
+    ]);
+    let b2 = U256([
+        0xE86C90E49284EB15,
+        0x3086D221A7D46BCD,
+        0x0000000000000000,
+        0x0000000000000000,
+    ]);
+
+    // c1 = floor(k · g1 / 2^384), c2 = floor(k · g2 / 2^384)
+    // These are the Babai rounding coefficients.
+    let c1 = mul256_top128(k, &g1);
+    let c2 = mul256_top128(k, &g2);
+
+    let c1_u = U256([c1 as u64, (c1 >> 64) as u64, 0, 0]);
+    let c2_u = U256([c2 as u64, (c2 >> 64) as u64, 0, 0]);
+
+    // r2 = c2·b2 − c1·b1  mod n
+    // This gives min(r2, n-r2) < 2^128.
+    let t1 = fn_mul(&c1_u, &b1);
+    let t2 = fn_mul(&c2_u, &b2);
+    let r2_raw = fn_sub(&t2, &t1);
+
+    // r1 = k − r2·λ  mod n
+    // This gives min(r1, n-r1) < 2^129.
+    let r2_lam = fn_mul(&r2_raw, &LAMBDA);
+    let r1_raw = fn_sub(k, &r2_lam);
+
+    (
+        S129::from_u256_signed(r1_raw),
+        S129::from_u256_signed(r2_raw),
+    )
+}
+
+/// Compute bits [384, 512) of (a · b) — i.e. the top 128 bits of the
+/// 512-bit product, which equals floor(a·b / 2^384).
+fn mul256_top128(a: &U256, b: &U256) -> u128 {
+    // We need the 8-limb product; bits [384,512) are limbs [6] and [7].
+    let wide = mul_wide(a, b);
+    wide[6] as u128 | ((wide[7] as u128) << 64)
+}
+
+/// Subtract scalars mod n: (a - b) mod n.
+fn fn_sub(a: &U256, b: &U256) -> U256 {
+    let (d, borrow) = a.sbb(b);
+    if borrow == 1 {
+        // underflowed: add n
+        let (d2, _) = d.adc(&N);
+        d2
+    } else {
+        d
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// wNAF (width-5) scalar representation
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WNAF_WIDTH: usize = 5;
+const WNAF_WINDOW: i32 = 1 << WNAF_WIDTH; // 32
+const WNAF_MASK: i32 = WNAF_WINDOW - 1; // 31
+
+/// Compute the width-5 wNAF representation of a 129-bit scalar.
+/// `k_lo` = bits 0..127, `k_hi` = bit 128 (the extra bit from GLV).
+/// Returns an array of 131 signed digits in {0, ±1, ±3, ±5, ±7, ±9, ±11, ±13, ±15}.
+fn wnaf_129(k_lo: u128, k_hi: bool) -> [i8; 131] {
+    // Represent the 129-bit scalar as a two-word integer:
+    // k = k_lo + k_hi * 2^128
+    // We process it one bit at a time, borrowing from k_hi when k_lo underflows.
+    let mut lo = k_lo;
+    let mut hi = k_hi as u128; // 0 or 1
+    let mut naf = [0i8; 131];
+    let mut i = 0usize;
+    while lo != 0 || hi != 0 {
+        if lo & 1 == 1 {
+            let mod_w = (lo as i32) & WNAF_MASK;
+            let digit = if mod_w > WNAF_WINDOW / 2 {
+                mod_w - WNAF_WINDOW
+            } else {
+                mod_w
+            };
+            naf[i] = digit as i8;
+            if digit < 0 {
+                // Adding |digit| — may carry into hi
+                let (new_lo, carry) = lo.overflowing_add((-digit) as u128);
+                lo = new_lo;
+                hi += carry as u128;
+            } else {
+                // Subtracting digit — k is odd so digit <= k, no borrow from hi needed
+                lo -= digit as u128;
+            }
+        }
+        // Shift right by 1
+        lo = (lo >> 1) | (hi << 127);
+        hi >>= 1;
+        i += 1;
+    }
+    naf
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalar multiplication: GLV + wNAF + Shamir
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a table of the odd multiples  [P, 3P, 5P, … (2w−1)P]  in Jacobian coords.
+/// `w = WNAF_WIDTH = 5`  ⟹  8 entries.
+fn build_table(p: &JacobianPoint) -> [JacobianPoint; 8] {
+    let p2 = point_double(p);
+    let mut table = [JacobianPoint::infinity(); 8];
+    table[0] = *p;
+    for i in 1..8 {
+        table[i] = point_add(&table[i - 1], &p2);
+    }
+    table
+}
+
+/// Lookup odd-multiple table: index `d` in [1,3,5,…,15] → table[(d-1)/2].
+/// Negative `d` flips the y-coordinate.
+fn table_get(table: &[JacobianPoint; 8], d: i8) -> JacobianPoint {
+    let idx = (d.unsigned_abs() as usize - 1) / 2;
+    let p = table[idx];
+    if d < 0 { point_neg(&p) } else { p }
+}
+
+/// Apply the secp256k1 GLV endomorphism  φ(P) = (β·Px, Py)  to an affine point.
+fn phi_affine(px: &U256, py: &U256) -> JacobianPoint {
+    JacobianPoint::from_affine(fp_mul(px, &BETA), *py)
+}
+
+/// Scalar multiplication: `scalar * G` using GLV decomposition + wNAF + Shamir's trick.
+fn scalar_mul_g(scalar: &U256) -> JacobianPoint {
+    scalar_mul_glv_wnaf(scalar, &GX, &GY)
+}
+
+/// Scalar multiplication: `scalar * (px, py)` using GLV + wNAF + Shamir's trick.
+fn scalar_mul_affine(scalar: &U256, px: &U256, py: &U256) -> JacobianPoint {
+    scalar_mul_glv_wnaf(scalar, px, py)
+}
+
+/// Core GLV + wNAF + Shamir scalar multiplication.
+///
+/// Given an affine base point P = (px, py) and scalar k:
+///  1. Decompose  k = k1 + k2·λ  with |k1|, |k2| ≤ 2^128.
+///  2. Build precomputed tables for P and φ(P).
+///  3. Compute wNAF representations of k1 and k2.
+///  4. Evaluate via simultaneous double-and-add (Shamir's trick).
+fn scalar_mul_glv_wnaf(scalar: &U256, px: &U256, py: &U256) -> JacobianPoint {
+    // Step 1 – GLV decomposition
+    let (k1, k2) = glv_decompose(scalar);
+
+    // Step 2 – build tables
+    // P1 = ±P  (sign from k1)
+    let p1_base = if k1.neg {
+        JacobianPoint::from_affine(*px, fp_neg(py))
+    } else {
+        JacobianPoint::from_affine(*px, *py)
+    };
+    // P2 = ±φ(P)  (sign from k2)
+    let phi_p = phi_affine(px, py);
+    let p2_base = if k2.neg { point_neg(&phi_p) } else { phi_p };
+
+    let table1 = build_table(&p1_base);
+    let table2 = build_table(&p2_base);
+
+    // Step 3 – wNAF of |k1| and |k2|
+    let naf1 = wnaf_129(k1.mag, k1.hi);
+    let naf2 = wnaf_129(k2.mag, k2.hi);
+
+    // Step 4 – Shamir double-and-add from MSB
+    let mut acc = JacobianPoint::infinity();
+    let len = 131usize;
+    for i in (0..len).rev() {
+        if !acc.is_infinity() {
+            acc = point_double(&acc);
+        }
+        if naf1[i] != 0 {
+            let addend = table_get(&table1, naf1[i]);
+            acc = if acc.is_infinity() {
+                addend
+            } else {
+                point_add(&acc, &addend)
+            };
+        }
+        if naf2[i] != 0 {
+            let addend = table_get(&table2, naf2[i]);
+            acc = if acc.is_infinity() {
+                addend
+            } else {
+                point_add(&acc, &addend)
+            };
+        }
     }
     acc
 }

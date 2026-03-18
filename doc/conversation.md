@@ -146,3 +146,57 @@ hand-written assembly), whereas our current implementation uses a simple
 double-and-add loop. These numbers define the improvement target for the
 forthcoming assembly/SIMD optimisations.
 
+---
+
+## 2026-03-18 — GLV + wNAF Shamir scalar multiplication
+
+### Prompt
+> Can we use the wnaf+glv endomorphism in our reference code?
+
+### High-level effects
+
+Replaced the simple double-and-add scalar multiplication in `src/ecdsa.rs` with
+a complete GLV+wNAF Shamir simultaneous scalar multiplication:
+
+**Algorithm overview:**
+- **GLV decomposition:** Any scalar `k` is split into two ~128-bit sub-scalars
+  `k1`, `k2` satisfying `k ≡ k1 + k2·λ (mod n)`, where `λ` is the GLV
+  eigenvalue. This halves the effective scalar size.
+- **wNAF width-5:** Each sub-scalar is encoded in width-5 Non-Adjacent Form,
+  giving digits in `{0, ±1, ±3, ±5, ±7, ±9, ±11, ±13, ±15}`. Window tables of
+  8 precomputed odd multiples `[P, 3P, …, 15P]` are built for `P` and `φ(P)`.
+- **Shamir's trick:** Both wNAF sequences are processed together in a single
+  131-step loop, roughly doubling throughput vs two independent multiplications.
+- **φ(P):** The GLV endomorphism maps affine point `(x, y)` to `(β·x, y)` in
+  O(1) field multiplications, where `β = (√(−3) − 1)/2 mod p`.
+
+**Key new types and functions:**
+- `S129` — signed 129-bit integer `{ mag: u128, hi: bool, neg: bool }` for
+  sub-scalar storage.
+- `glv_decompose(k) -> (S129, S129)` — Babai rounding decomposition using
+  precomputed 256-bit lattice constants `g1`, `g2`, `b1`, `b2`.
+- `wnaf_129(k_lo, k_hi) -> [i8; 131]` — width-5 wNAF with correct carry
+  handling for 129-bit inputs.
+- `build_table`, `table_get` — precomputed odd multiples and signed lookup.
+- `phi_affine(px, py)` — applies the GLV endomorphism.
+- `scalar_mul_glv_wnaf` — core Shamir loop; replaces both `scalar_mul_g` and
+  `scalar_mul_affine`.
+- `point_add` — full Jacobian-Jacobian point addition.
+- `point_neg` — negate a Jacobian point.
+
+**Bugs found and fixed during implementation (7 total in constants/formulas):**
+1. GLV formula: `r2 = c2·b2 − c1·b1 mod n` (not `c1·(−b1) + c2·(−b2)`).
+2. `S129` struct: added `hi: bool` for bit 128 (k1 can reach 129 bits).
+3. `wnaf_129`: replaced 128-bit version; carries correctly between `lo`/`hi`.
+4. `n_half`: wrong constant (`0xDFE92F4661B8DD57` → `0xDFE92F46681B20A0`).
+5. `LAMBDA` limb[0]: nibble-shifted (`0x2E0CFC810B51283C` → `0xE0CFC810B51283CE`).
+6. `BETA` lower 3 limbs: all three wrong; corrected to match secp256k1 spec.
+7. `BETA` value itself: was `0x7AE96A2B657C0710…` (wrong cube root of unity);
+   correct value is `β = (√(−3)−1)/2 mod p = 0x851695D49A83F8EF…` which
+   satisfies `φ(P) = λ·P` for all curve points.
+
+**Final constants (verified):**
+- `BETA = 0x851695d49a83f8ef919bb86153cbcb16630fb68aed0a766a3ec693d68e6afa40`
+- `LAMBDA = 0xac9c52b33fa3cf1f5ad9e3fd77ed9ba4a880b9fc8ec739c2e0cfc810b51283ce`
+
+All 10 tests pass.
