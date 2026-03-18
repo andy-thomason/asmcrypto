@@ -253,3 +253,101 @@ the same schoolbook core.
 4. **`to_affine` (1%)** — one modular inversion (254-step exponentiation).
    Batching inversions across multiple signature verifications (Montgomery's
    trick) would amortise this cost.
+
+---
+
+## 2026-03-18 — ADX mul_wide, precomputed G table, target-cpu=native
+
+### Prompt
+> Do all of these [three optimisation targets from the perf profile].
+
+### High-level effects
+
+**1. `.cargo/config.toml` — native CPU tuning (new file)**
+
+```toml
+[build]
+rustflags = ["-C", "target-cpu=native"]
+```
+
+Enables LLVM to emit BMI2 and ADX instructions throughout the crate and makes
+`#[cfg(target_feature = "bmi2")]` / `"adx"` resolve to `true` at compile time
+on this machine (AMD Ryzen 9 9955HX).
+
+**2. ADX-accelerated `mul_wide` (`src/ecdsa.rs`)**
+
+`mul_wide` is the 256×256→512-bit schoolbook multiply called by both `fp_mul`
+(68% of cycles) and `fn_mul` (11.5%). It was replaced with two implementations
+selected at compile time:
+
+- **`mul_wide_adx`** — 4-row MULX/ADCX/ADOX inline assembly using per-row
+  **two-chain carry** (ADCX feeds CF, ADOX feeds OF in parallel), eliminating
+  the serialisation between multiply and add:
+  - `MULX r_hi, r_lo, mem` — multiplies `rdx * mem`, stores hi:lo in two
+    registers without touching any flags.
+  - `ADCX dst, src` — `dst += src + CF`, sets CF only.
+  - `ADOX dst, src` — `dst += src + OF`, sets OF only.
+  - `xor e_reg, e_reg` at each row start atomically clears both CF and OF.
+  - Register map: r8–r15, rcx, rdi (8 accumulators R[0]–R[7]), r9/r13
+    (hi/lo temps), rax (zero constant), rdx (b[i] for MULX).
+  - `rbx` is off-limits in Rust's inline asm on Linux (LLVM uses it internally);
+    replaced with `rdi` for R[7].
+  - `#[target_feature(enable = "bmi2,adx")]` guards the function; `#[inline(always)]`
+    cannot be combined with `#[target_feature]` (Rust issue #145574), removed.
+
+- **`mul_wide_generic`** — the original schoolbook `u128`-based loop, used when
+  BMI2/ADX are unavailable.
+
+- **`mul_wide`** — dispatch function using `#[cfg(target_feature)]`; selects ADX
+  path at zero runtime cost when both features are present.
+
+**3. Precomputed affine G and φ(G) tables (`src/ecdsa.rs`)**
+
+Two compile-time constants added after `LAMBDA`:
+
+- **`G_TABLE: [(U256, U256); 8]`** — affine coordinates of [G, 3G, 5G, …, 15G],
+  the 8 odd multiples used by window-4 wNAF.
+- **`PHI_G_TABLE: [(U256, U256); 8]`** — affine coordinates of [φ(G), 3φ(G),
+  …, 15φ(G)].  Since the GLV endomorphism maps (x, y) → (β·x, y), the
+  y-coordinates are identical to `G_TABLE`; only the x-coordinates differ.
+
+Both tables were computed via Python using actual secp256k1 curve arithmetic and
+verified against known generator coordinates.
+
+**4. Fixed-base `scalar_mul_g` rewritten**
+
+`scalar_mul_g` previously delegated to the general `scalar_mul_glv_wnaf` with GX/GY
+as input. It is now a dedicated fixed-base implementation:
+
+- Skips the `build_table` step entirely (tables are compile-time constants).
+- Uses `point_add_mixed(&acc, &qx, &qy)` (assumes Z₂=1) instead of full
+  `point_add`, saving ~4 `fp_mul` per step (madd-2007-bl vs add-2007-bl).
+- Helper functions `g_table_lookup(d, negate)` and `phi_g_table_lookup(d, negate)`
+  combine the subscalar sign flag (from GLV decomposition) with the wNAF digit
+  sign to avoid redundant negation branches.
+
+**5. Correctness**
+
+All 10 tests pass. No warnings after:
+- wrapping the `asm!` macro in an explicit `unsafe {}` block (Rust 2024
+  `unsafe_op_in_unsafe_fn` lint).
+- adding `#[allow(dead_code)]` to `GX` / `GY` (superseded by `G_TABLE[0]` but
+  retained as documentation constants).
+
+**Benchmark results (criterion, release, target-cpu=native):**
+
+| Benchmark | Before | After | Speedup |
+|---|---|---|---|
+| asmcrypto recover_public_key | 60.5 µs | 57.2 µs | +5.8% |
+| asmcrypto recover_address | 60.5 µs | 57.0 µs | +5.8% |
+| k256 recover_public_key | — | 115.8 µs | (ref) |
+| secp256k1 recover_public_key | — | 21.5 µs | (target) |
+
+The ADX `mul_wide` is responsible for the full 5.8% improvement on the ECDSA
+benchmarks (both paths use variable-base multiplication; the precomputed G table
+accelerates signing but `recover_public_key` uses only `scalar_mul_affine`).
+
+The remaining 2.6× gap vs secp256k1 is attributable to:
+- `point_double` (8 fp_mul currently, no ADX in the doubling formula itself),
+- Jacobian → affine conversion (one 254-step exponentiation, not batched),
+- Solinas reduction in `fp_reduce_wide` (not yet pipelined with the multiply).

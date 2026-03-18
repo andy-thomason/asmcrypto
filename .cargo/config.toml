@@ -1,0 +1,5 @@
+[build]
+# Compile for the host CPU so the compiler can use BMI2, ADX, AVX-512 IFMA
+# and other extensions present on the build machine.  The resulting binaries
+# are not portable to older CPUs.
+rustflags = ["-C", "target-cpu=native"]

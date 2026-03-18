@@ -52,12 +52,15 @@ const P_PLUS_ONE_DIV_4: U256 = U256([
 ]);
 
 // Generator point G  (affine coordinates, uncompressed).
+// Kept as named constants for clarity; also embedded in G_TABLE[0].
+#[allow(dead_code)]
 const GX: U256 = U256([
     0x59F2815B16F81798,
     0x029BFCDB2DCE28D9,
     0x55A06295CE870B07,
     0x79BE667EF9DCBBAC,
 ]);
+#[allow(dead_code)]
 const GY: U256 = U256([
     0x9C47D08FFB10D4B8,
     0xFD17B448A6855419,
@@ -106,6 +109,265 @@ const LAMBDA: U256 = U256([
     0x5AD9E3FD77ED9BA4,
     0xAC9C52B33FA3CF1F,
 ]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Precomputed affine tables for fixed-base G multiplication
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Storing odd multiples [G, 3G, 5G, … 15G] and [φ(G), 3φ(G), … 15φ(G)] in
+// affine form allows `point_add_mixed` (Z₂=1) in the Shamir loop for
+// `scalar_mul_g`, saving 4 fp_mul per addition vs full Jacobian addition.
+//
+// Values verified against secp256k1 curve parameters via Python.
+
+/// Odd multiples of the generator G in affine form: [G, 3G, 5G, … 15G].
+const G_TABLE: [(U256, U256); 8] = [
+    (
+        // 1·G
+        U256([
+            0x59F2815B16F81798,
+            0x029BFCDB2DCE28D9,
+            0x55A06295CE870B07,
+            0x79BE667EF9DCBBAC,
+        ]),
+        U256([
+            0x9C47D08FFB10D4B8,
+            0xFD17B448A6855419,
+            0x5DA4FBFC0E1108A8,
+            0x483ADA7726A3C465,
+        ]),
+    ),
+    (
+        // 3·G
+        U256([
+            0x8601F113BCE036F9,
+            0xB531C845836F99B0,
+            0x49344F85F89D5229,
+            0xF9308A019258C310,
+        ]),
+        U256([
+            0x6CB9FD7584B8E672,
+            0x6500A99934C2231B,
+            0x0FE337E62A37F356,
+            0x388F7B0F632DE814,
+        ]),
+    ),
+    (
+        // 5·G
+        U256([
+            0xCBA8D569B240EFE4,
+            0xE88B84BDDC619AB7,
+            0x55B4A7250A5C5128,
+            0x2F8BDE4D1A072093,
+        ]),
+        U256([
+            0xDCA87D3AA6AC62D6,
+            0xF788271BAB0D6840,
+            0xD4DBA9DDA6C9C426,
+            0xD8AC222636E5E3D6,
+        ]),
+    ),
+    (
+        // 7·G
+        U256([
+            0xE92BDDEDCAC4F9BC,
+            0x3D419B7E0330E39C,
+            0xA398F365F2EA7A0E,
+            0x5CBDF0646E5DB4EA,
+        ]),
+        U256([
+            0xA5082628087264DA,
+            0xA813D0B813FDE7B5,
+            0xA3178D6D861A54DB,
+            0x6AEBCA40BA255960,
+        ]),
+    ),
+    (
+        // 9·G
+        U256([
+            0xC35F110DFC27CCBE,
+            0xE09796974C57E714,
+            0x09AD178A9F559ABD,
+            0xACD484E2F0C7F653,
+        ]),
+        U256([
+            0x05CC262AC64F9C37,
+            0xADD888A4375F8E0F,
+            0x64380971763B61E9,
+            0xCC338921B0A7D9FD,
+        ]),
+    ),
+    (
+        // 11·G
+        U256([
+            0xBBEC17895DA008CB,
+            0x5649980BE5C17891,
+            0x5EF4246B70C65AAC,
+            0x774AE7F858A9411E,
+        ]),
+        U256([
+            0x301D74C9C953C61B,
+            0x372DB1E2DFF9D6A8,
+            0x0243DD56D7B7B365,
+            0xD984A032EB6B5E19,
+        ]),
+    ),
+    (
+        // 13·G
+        U256([
+            0xDEEDDF8F19405AA8,
+            0xB075FBC6610E58CD,
+            0xC7D1D205C3748651,
+            0xF28773C2D975288B,
+        ]),
+        U256([
+            0x29B5CB52DB03ED81,
+            0x3A1A06DA521FA91F,
+            0x758212EB65CDAF47,
+            0x0AB0902E8D880A89,
+        ]),
+    ),
+    (
+        // 15·G
+        U256([
+            0x44ADBCF8E27E080E,
+            0x31E5946F3C85F79E,
+            0x5A465AE3095FF411,
+            0xD7924D4F7D43EA96,
+        ]),
+        U256([
+            0xC504DC9FF6A26B58,
+            0xEA40AF2BD896D3A5,
+            0x83842EC228CC6DEF,
+            0x581E2872A86C72A6,
+        ]),
+    ),
+];
+
+/// Odd multiples of φ(G) in affine form: [φ(G), 3φ(G), … 15φ(G)].
+/// φ(P) = (β·Pₓ mod p, Pᵧ).  y-coordinates are identical to G_TABLE entries.
+const PHI_G_TABLE: [(U256, U256); 8] = [
+    (
+        // 1·φ(G)
+        U256([
+            0xFE51DE5EE84F50FB,
+            0x763BBF1E531BED98,
+            0xFF5E9AB39AE8D1D3,
+            0xC994B69768832BCB,
+        ]),
+        U256([
+            0x9C47D08FFB10D4B8,
+            0xFD17B448A6855419,
+            0x5DA4FBFC0E1108A8,
+            0x483ADA7726A3C465,
+        ]),
+    ),
+    (
+        // 3·φ(G)
+        U256([
+            0x820D9C5DCBFF5636,
+            0xBFDC5797B5B3D832,
+            0x28FE22AADD39B3A6,
+            0x276096FAFA87A1A4,
+        ]),
+        U256([
+            0x6CB9FD7584B8E672,
+            0x6500A99934C2231B,
+            0x0FE337E62A37F356,
+            0x388F7B0F632DE814,
+        ]),
+    ),
+    (
+        // 5·φ(G)
+        U256([
+            0x20CAC14EB816D5E3,
+            0x772F120342CDCD7C,
+            0xB2AC03DF28EA6865,
+            0x9CF8CECF391E958C,
+        ]),
+        U256([
+            0xDCA87D3AA6AC62D6,
+            0xF788271BAB0D6840,
+            0xD4DBA9DDA6C9C426,
+            0xD8AC222636E5E3D6,
+        ]),
+    ),
+    (
+        // 7·φ(G)
+        U256([
+            0xDB0FB9A2E6E745DF,
+            0xB583439FED1FA1B8,
+            0xB76847C84C7FC583,
+            0x8F4FA12645B83F9D,
+        ]),
+        U256([
+            0xA5082628087264DA,
+            0xA813D0B813FDE7B5,
+            0xA3178D6D861A54DB,
+            0x6AEBCA40BA255960,
+        ]),
+    ),
+    (
+        // 9·φ(G)
+        U256([
+            0x1BD35DC19E42F14E,
+            0x6A029B72C43AD40A,
+            0x7AED8FC57451BA21,
+            0xCB77771990F32193,
+        ]),
+        U256([
+            0x05CC262AC64F9C37,
+            0xADD888A4375F8E0F,
+            0x64380971763B61E9,
+            0xCC338921B0A7D9FD,
+        ]),
+    ),
+    (
+        // 11·φ(G)
+        U256([
+            0x7E14A540E73F567D,
+            0x3030CC3D0EDE914D,
+            0x13825F52D07A8B2D,
+            0x36C04436903912C4,
+        ]),
+        U256([
+            0x301D74C9C953C61B,
+            0x372DB1E2DFF9D6A8,
+            0x0243DD56D7B7B365,
+            0xD984A032EB6B5E19,
+        ]),
+    ),
+    (
+        // 13·φ(G)
+        U256([
+            0xC06732049F5FE73E,
+            0x1CF9856254B4A1CF,
+            0x3129C1B4C38F0173,
+            0x1C2B3405DAD246D2,
+        ]),
+        U256([
+            0x29B5CB52DB03ED81,
+            0x3A1A06DA521FA91F,
+            0x758212EB65CDAF47,
+            0x0AB0902E8D880A89,
+        ]),
+    ),
+    (
+        // 15·φ(G)
+        U256([
+            0x80919EF8ABD03C9C,
+            0xC84E2FC701B96228,
+            0x979E5CF7A574A2A6,
+            0xA80EA1AA8CC2D01F,
+        ]),
+        U256([
+            0xC504DC9FF6A26B58,
+            0xEA40AF2BD896D3A5,
+            0x83842EC228CC6DEF,
+            0x581E2872A86C72A6,
+        ]),
+    ),
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // U256 — 256-bit unsigned integer
@@ -191,7 +453,122 @@ impl U256 {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Schoolbook multiplication producing an 8-limb (512-bit) result.
-fn mul_wide(a: &U256, b: &U256) -> [u64; 8] {
+/// 256×256→512-bit schoolbook multiply using MULX + ADCX/ADOX (ADX extension).
+///
+/// Two independent carry chains — CF (ADCX) and OF (ADOX) — let each row's
+/// partial products and their carries pipeline concurrently, instead of the
+/// serialised MUL/ADD/ADC sequence produced from the generic Rust loop.
+///
+/// Register map across the four rows:
+///   r8=R[0]  r10=R[1]  r12=R[2]  r14=R[3]
+///   r15=R[4] r11=R[5]  rcx=R[6]  rdi=R[7]
+///   r9, r13 = hi / lo temporaries; rdx = b[i]; rax = 0
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "bmi2",
+    target_feature = "adx"
+))]
+#[target_feature(enable = "bmi2,adx")]
+unsafe fn mul_wide_adx(a: &U256, b: &U256) -> [u64; 8] {
+    let (r0, r1, r2, r3, r4, r5, r6, r7);
+    // SAFETY: caller guarantees BMI2 and ADX are available (enforced by cfg guard).
+    unsafe {
+        core::arch::asm!(
+            // rax = 0 throughout (drains stray carries)
+            "xor eax, eax",
+
+            // ── ROW 0: rdx = b[0] ────────────────────────────────────────────────
+            "mov rdx, [{bp}]",
+            "mulx r9,  r8,  [{ap}]",        // r8  = lo(a0·b0), r9  = hi
+            "mulx r11, r10, [{ap}+8]",      // r10 = lo(a1·b0), r11 = hi
+            "mulx r13, r12, [{ap}+16]",     // r12 = lo(a2·b0), r13 = hi
+            "mulx r15, r14, [{ap}+24]",     // r14 = lo(a3·b0), r15 = hi → R[4]
+            // Chain hi values into the next column (plain ADD: no prior data to merge)
+            "add  r10, r9",                 // R[1] CF
+            "adc  r12, r11",                // R[2] CF
+            "adc  r14, r13",                // R[3] CF
+            "adc  r15, rax",                // R[4] = hi(a3·b0) + CF  (rax=0)
+            "xor r11d, r11d",               // R[5] = r11 = 0
+
+            // ── ROW 1: rdx = b[1] ────────────────────────────────────────────────
+            "mov rdx, [{bp}+8]",
+            "xor eax, eax",                 // CF=0, OF=0, rax=0
+            "mulx r9, r13, [{ap}]",
+            "adcx r10, r13",                // R[1] += lo(a0·b1), CF
+            "adox r12, r9",                 // R[2] += hi(a0·b1), OF
+            "mulx r9, r13, [{ap}+8]",
+            "adcx r12, r13",                // R[2] += lo(a1·b1), CF
+            "adox r14, r9",                 // R[3] += hi, OF
+            "mulx r9, r13, [{ap}+16]",
+            "adcx r14, r13",                // R[3] += lo, CF
+            "adox r15, r9",                 // R[4] += hi, OF
+            "mulx r9, r13, [{ap}+24]",
+            "adcx r15, r13",                // R[4] += lo, CF
+            "adox r11, r9",                 // R[5] += hi, OF  (r11 was 0)
+            "adcx r11, rax",                // drain CF
+            "adox r11, rax",                // drain OF
+            "xor ecx, ecx",                 // R[6] = rcx = 0
+
+            // ── ROW 2: rdx = b[2] ────────────────────────────────────────────────
+            "mov rdx, [{bp}+16]",
+            "xor eax, eax",
+            "mulx r9, r13, [{ap}]",
+            "adcx r12, r13",                // R[2] += lo, CF
+            "adox r14, r9",                 // R[3] += hi, OF
+            "mulx r9, r13, [{ap}+8]",
+            "adcx r14, r13",                // R[3] += lo, CF
+            "adox r15, r9",                 // R[4] += hi, OF
+            "mulx r9, r13, [{ap}+16]",
+            "adcx r15, r13",                // R[4] += lo, CF
+            "adox r11, r9",                 // R[5] += hi, OF
+            "mulx r9, r13, [{ap}+24]",
+            "adcx r11, r13",                // R[5] += lo, CF
+            "adox rcx, r9",                 // R[6] += hi, OF  (rcx was 0)
+            "adcx rcx, rax",                // drain CF
+            "adox rcx, rax",                // drain OF
+            "xor edi, edi",                 // R[7] = rdi = 0  (also clears CF, OF)
+
+            // ── ROW 3: rdx = b[3] ────────────────────────────────────────────────
+            "mov rdx, [{bp}+24]",
+            "xor eax, eax",
+            "mulx r9, r13, [{ap}]",
+            "adcx r14, r13",                // R[3] += lo, CF
+            "adox r15, r9",                 // R[4] += hi, OF
+            "mulx r9, r13, [{ap}+8]",
+            "adcx r15, r13",                // R[4] += lo, CF
+            "adox r11, r9",                 // R[5] += hi, OF
+            "mulx r9, r13, [{ap}+16]",
+            "adcx r11, r13",                // R[5] += lo, CF
+            "adox rcx, r9",                 // R[6] += hi, OF
+            "mulx r9, r13, [{ap}+24]",
+            "adcx rcx, r13",                // R[6] += lo, CF
+            "adox rdi, r9",                 // R[7] += hi, OF  (rdi was 0)
+            "adcx rdi, rax",                // drain final CF
+            "adox rdi, rax",                // drain final OF
+
+            ap  = in(reg) a.0.as_ptr(),
+            bp  = in(reg) b.0.as_ptr(),
+            out("r8")  r0,
+            out("r10") r1,
+            out("r12") r2,
+            out("r14") r3,
+            out("r15") r4,
+            out("r11") r5,
+            out("rcx") r6,
+            out("rdi") r7,
+            out("r9")  _,
+            out("r13") _,
+            out("rax") _,
+            out("rdx") _,
+            options(nostack),
+        );
+    } // end unsafe asm
+    [r0, r1, r2, r3, r4, r5, r6, r7]
+}
+
+/// 256×256→512-bit schoolbook multiply — generic fallback.
+#[inline(always)]
+fn mul_wide_generic(a: &U256, b: &U256) -> [u64; 8] {
     let mut r = [0u64; 8];
     for i in 0..4 {
         let mut carry = 0u128;
@@ -203,6 +580,21 @@ fn mul_wide(a: &U256, b: &U256) -> [u64; 8] {
         r[i + 4] += carry as u64;
     }
     r
+}
+
+/// Dispatch: use the ADX version when the CPU supports BMI2 + ADX, otherwise fall back.
+#[inline(always)]
+fn mul_wide(a: &U256, b: &U256) -> [u64; 8] {
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "bmi2",
+        target_feature = "adx"
+    ))]
+    // SAFETY: cfg guards guarantee BMI2 and ADX are available at compile time.
+    return unsafe { mul_wide_adx(a, b) };
+
+    #[allow(unreachable_code)]
+    mul_wide_generic(a, b)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -836,9 +1228,66 @@ fn phi_affine(px: &U256, py: &U256) -> JacobianPoint {
     JacobianPoint::from_affine(fp_mul(px, &BETA), *py)
 }
 
-/// Scalar multiplication: `scalar * G` using GLV decomposition + wNAF + Shamir's trick.
+/// Fetch odd-multiple `d` of G from `G_TABLE`, accounting for the overall negation
+/// flag `negate` (from GLV subscalar sign) and the signed wNAF digit `d`.
+///
+/// Returns `(x, y)` in affine coordinates on secp256k1.
+#[inline(always)]
+fn g_table_lookup(d: i8, negate: bool) -> (U256, U256) {
+    // Combine scalar-level negation with digit sign.
+    let d = if negate { -d } else { d };
+    let idx = (d.unsigned_abs() as usize - 1) / 2;
+    let (x, y) = G_TABLE[idx];
+    if d < 0 { (x, fp_neg(&y)) } else { (x, y) }
+}
+
+/// Fetch odd-multiple `d` of φ(G) from `PHI_G_TABLE`, same convention as above.
+#[inline(always)]
+fn phi_g_table_lookup(d: i8, negate: bool) -> (U256, U256) {
+    let d = if negate { -d } else { d };
+    let idx = (d.unsigned_abs() as usize - 1) / 2;
+    let (x, y) = PHI_G_TABLE[idx];
+    if d < 0 { (x, fp_neg(&y)) } else { (x, y) }
+}
+
+/// Fixed-base scalar multiplication `scalar * G`.
+///
+/// Optimised over the general GLV+wNAF path by using precomputed affine tables
+/// `G_TABLE` / `PHI_G_TABLE` (odd multiples [1..15]) so every addition can call
+/// `point_add_mixed` (Z₂=1), saving ≈4 fp_mul per step compared to a full
+/// Jacobian addition.
 fn scalar_mul_g(scalar: &U256) -> JacobianPoint {
-    scalar_mul_glv_wnaf(scalar, &GX, &GY)
+    // Step 1 – GLV decomposition
+    let (k1, k2) = glv_decompose(scalar);
+
+    // Step 2 – wNAF of |k1| and |k2|
+    let naf1 = wnaf_129(k1.mag, k1.hi);
+    let naf2 = wnaf_129(k2.mag, k2.hi);
+
+    // Step 3 – Shamir double-and-add from MSB using mixed addition
+    let mut acc = JacobianPoint::infinity();
+    for i in (0..131usize).rev() {
+        if !acc.is_infinity() {
+            acc = point_double(&acc);
+        }
+        if naf1[i] != 0 {
+            let (qx, qy) = g_table_lookup(naf1[i], k1.neg);
+            acc = if acc.is_infinity() {
+                JacobianPoint::from_affine(qx, qy)
+            } else {
+                point_add_mixed(&acc, &qx, &qy)
+            };
+        }
+        if naf2[i] != 0 {
+            let (qx, qy) = phi_g_table_lookup(naf2[i], k2.neg);
+            acc = if acc.is_infinity() {
+                JacobianPoint::from_affine(qx, qy)
+            } else {
+                point_add_mixed(&acc, &qx, &qy)
+            };
+        }
+    }
+    acc
 }
 
 /// Scalar multiplication: `scalar * (px, py)` using GLV + wNAF + Shamir's trick.
