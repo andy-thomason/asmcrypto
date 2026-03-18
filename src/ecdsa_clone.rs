@@ -12,13 +12,17 @@
 //!    (x^(m-2) mod m) instead of the Safegcd-based `modinv64` algorithm used by
 //!    the C library, because translating modinv64_impl.h (~700 lines) is out of
 //!    scope.  The mathematical result is identical; only the performance differs.
-//!  - `ecmult` uses a plain interleaved double-and-add Shamir instead of the
-//!    Strauss wNAF algorithm with precomputed tables used by the C library.
-//!    Again, results are identical.
+//!  - `ecmult` implements Strauss wNAF (w=5) with GLV endomorphism, matching
+//!    the C algorithm.  The precomputed G / 2¹²⁸·G tables are cached in a
+//!    `OnceLock` so the 128-doubling setup cost is paid only on the first call.
+//!    The C library uses a much larger static window (WINDOW_G≈15); here we use
+//!    the same WINDOW_A=5 for G, trading table size for simplicity.
 //!  - VERIFY_CHECK / VERIFY_BITS / magnitude tracking are omitted (they are
 //!    debug-only assertions in the C library).
 
 #![allow(dead_code, clippy::many_single_char_names)]
+
+use std::sync::OnceLock;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // § 1  Field element  (5 × 52-bit limbs, C: secp256k1_fe)
@@ -1465,33 +1469,364 @@ pub fn gej_add_ge(a: &Gej, b: &Ge) -> Gej {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// § 4  Simple ecmult  (not from C; plain Shamir double-and-add)
+// § 4  Strauss wNAF ecmult  (matches C library algorithm)
 //
-// The C library uses Strauss wNAF with large precomputed tables:
-//   $BASE/ecmult_impl.h  – `ecmult`
-//   $BASE/ecmult_gen_impl.h – `ecmult_gen`
-// We use a simpler loop; the result is identical, performance differs.
+//   C: $BASE/ecmult_impl.h  – `ecmult`, `ecmult_strauss_wnaf`,
+//      `ecmult_odd_multiples_table`, `ecmult_wnaf`, `ecmult_table_get_ge`
+//   C: $BASE/scalar_impl.h  – `scalar_split_lambda`
+//   C: $BASE/scalar_4x64_impl.h – `scalar_split_128`, `scalar_mul_shift_var`
+//   C: $BASE/field.h        – `const_beta`
+//
+// GLV endomorphism: for secp256k1, φ(x,y) = (β·x, y) satisfies λ·φ(P) = P
+// where λ³ ≡ 1 (mod n) and β³ ≡ 1 (mod p).  Splitting a 256-bit scalar into
+// two ~128-bit halves via scalar_split_lambda halves the main-loop length.
+//
+// G is additionally split at bit-128 (ng_1 + ng_128·2¹²⁸) so all four wNAFs
+// are ≤ 129 bits.  Two per-call tables of size 8 are built for A and for G
+// (and two more for λ·A and 2¹²⁸·G) using Montgomery's batch-inversion trick.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Compute `u1*G + u2*a` (interleaved Shamir double-and-add).
-pub fn ecmult(a: &Gej, u2: &Scalar, u1: &Scalar) -> Gej {
-    let g = G();
-    let ag = ge_set_gej_var(a); // affine A
+/// Window size for Strauss wNAF — matches C's WINDOW_A.
+const WINDOW_A: usize = 5;
+/// Number of table entries per scalar: 2^(w-2) = 8 → {1,3,…,15}·P.
+const TABLE_SIZE: usize = 1 << (WINDOW_A - 2);
 
-    let mut r = Gej::infinity();
-    for bit in (0..256).rev() {
-        r = gej_double(&r);
-        let b1 = (u1.d[bit >> 6] >> (bit & 63)) & 1;
-        let b2 = (u2.d[bit >> 6] >> (bit & 63)) & 1;
-        match (b1, b2) {
-            (1, 0) => r = gej_add_ge_var(&r, &g),
-            (0, 1) => r = gej_add_ge_var(&r, &ag),
-            (1, 1) => {
-                // G + A in affine, then add
-                r = gej_add_ge_var(&r, &g);
-                r = gej_add_ge_var(&r, &ag);
+// ── GLV constants ─────────────────────────────────────────────────────────────
+// C: $BASE/scalar_impl.h
+// λ: scalar cube-root of unity,  λ·G = φ(G) = (β·Gx, Gy).
+// SECP256K1_SCALAR_CONST is big-endian; d[] is little-endian 64-bit.
+const LAMBDA: Scalar = Scalar {
+    d: [
+        0xDF02967C_1B23BD72,
+        0x122E22EA_20816678,
+        0xA5261C02_8812645A,
+        0x5363AD4C_C05C30E0,
+    ],
+};
+// minus_b1,  minus_b2,  g1,  g2  — for algorithm 3.74 (GLV decomposition)
+const MINUS_B1: Scalar = Scalar {
+    d: [0x6F547FA9_0ABFE4C3, 0xE4437ED6_010E8828, 0, 0],
+};
+const MINUS_B2: Scalar = Scalar {
+    d: [
+        0xD765CDA8_3DB1562C,
+        0x8A280AC5_0774346D,
+        0xFFFFFFFF_FFFFFFFE,
+        0xFFFFFFFF_FFFFFFFF,
+    ],
+};
+const G1_GLV: Scalar = Scalar {
+    d: [
+        0xE893209A_45DBB031,
+        0x3DAA8A14_71E8CA7F,
+        0xE86C90E4_9284EB15,
+        0x3086D221_A7D46BCD,
+    ],
+};
+const G2_GLV: Scalar = Scalar {
+    d: [
+        0x1571B4AE_8AC47F71,
+        0x221208AC_9DF506C6,
+        0x6F547FA9_0ABFE4C4,
+        0xE4437ED6_010E8828,
+    ],
+};
+// β: field cube-root of unity,  β³ ≡ 1 (mod p).
+// C: $BASE/field.h  `const_beta`
+// SECP256K1_FE_CONST: 0x7ae96a2b 657c0710 6e64479e ac3434e9 9cf04975 12f58995 c1396c28 719501ee
+fn beta_fe() -> Fe {
+    Fe::set_b32_mod(&hex32(
+        "7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee",
+    ))
+}
+
+// ── Scalar helpers ────────────────────────────────────────────────────────────
+
+/// Extract `len` consecutive bits of `s` starting at bit `pos`.
+/// Precondition: 1 ≤ len ≤ 32 (wNAF window), pos < 256.
+/// — C: `scalar_get_bits` / `scalar_get_bits_var`
+#[inline(always)]
+fn scalar_get_bits(s: &Scalar, pos: usize, len: usize) -> u64 {
+    let limb = pos >> 6;
+    let off = pos & 63;
+    let lo = s.d[limb] >> off;
+    let val = if off + len > 64 && limb + 1 < 4 {
+        lo | (s.d[limb + 1] << (64 - off))
+    } else {
+        lo
+    };
+    val & ((1u64 << len).wrapping_sub(1))
+}
+
+/// Compute `(a * b) >> 384`, rounding to nearest.
+/// Used by scalar_split_lambda (shift is always 384 so specialised here).
+/// — C: $BASE/scalar_4x64_impl.h  `scalar_mul_shift_var` (shift=384)
+fn scalar_mul_shift_384(a: &Scalar, b: &Scalar) -> Scalar {
+    let l = scalar_mul_512(a, b);
+    // shift=384: shiftlimbs=6, shiftlow=0
+    // d[0] = l[6], d[1] = l[7], d[2]=d[3]=0.
+    let mut r = Scalar {
+        d: [l[6], l[7], 0, 0],
+    };
+    // Round: if MSB of l[5] (bit 383) is set, add 1 to d[0].
+    // C: scalar_cadd_bit(r, 0, (l[5] >> 63) & 1)
+    if (l[5] >> 63) & 1 != 0 {
+        let (v, carry) = r.d[0].overflowing_add(1);
+        r.d[0] = v;
+        if carry {
+            let (v, carry) = r.d[1].overflowing_add(1);
+            r.d[1] = v;
+            if carry {
+                r.d[2] = r.d[2].wrapping_add(1);
             }
-            _ => {}
+        }
+    }
+    r
+}
+
+/// Split `k` into `(r1, r2)` with `r1 + λ·r2 ≡ k (mod n)`, both ~128 bits.
+/// — C: $BASE/scalar_impl.h  `scalar_split_lambda`  (algorithm 3.74)
+fn scalar_split_lambda(k: &Scalar) -> (Scalar, Scalar) {
+    let c1 = scalar_mul_shift_384(k, &G1_GLV);
+    let c2 = scalar_mul_shift_384(k, &G2_GLV);
+    let c1 = scalar_mul(&c1, &MINUS_B1);
+    let c2 = scalar_mul(&c2, &MINUS_B2);
+    let mut r2 = c1;
+    r2.add(&c2);
+    // r1 = k - r2 * λ
+    let mut r1 = scalar_mul(&r2, &LAMBDA);
+    r1 = r1.negate();
+    r1.add(k);
+    (r1, r2)
+}
+
+/// Split `k` into `(lo128, hi128)`: lo128 = k mod 2¹²⁸, hi128 = k >> 128.
+/// — C: $BASE/scalar_4x64_impl.h  `scalar_split_128`
+#[inline]
+fn scalar_split_128(k: &Scalar) -> (Scalar, Scalar) {
+    (
+        Scalar {
+            d: [k.d[0], k.d[1], 0, 0],
+        },
+        Scalar {
+            d: [k.d[2], k.d[3], 0, 0],
+        },
+    )
+}
+
+// ── wNAF ─────────────────────────────────────────────────────────────────────
+
+/// Convert scalar `s` to signed wNAF with window `w`.
+/// Returns `(wnaf[257], useful_length)`.
+/// Each non-zero wnaf[i] is odd and in `[-(2^(w-1)−1), 2^(w-1)−1]`.
+/// — C: $BASE/ecmult_impl.h  `ecmult_wnaf`
+fn ecmult_wnaf(s: &Scalar, w: usize) -> ([i32; 257], usize) {
+    let mut wnaf = [0i32; 257];
+    let mut s = *s;
+    let mut sign = 1i32;
+    let mut carry = 0i32;
+    let mut last_set = 0usize;
+
+    // Work with positive scalar (wNAF of −s is the negation of wNAF of s).
+    if scalar_get_bits(&s, 255, 1) != 0 {
+        s = s.negate();
+        sign = -1;
+    }
+
+    let mut bit = 0usize;
+    while bit < 256 {
+        if scalar_get_bits(&s, bit, 1) as i32 == carry {
+            bit += 1;
+            continue;
+        }
+        let now = w.min(256 - bit);
+        let word = scalar_get_bits(&s, bit, now) as i32 + carry;
+        carry = (word >> (w as i32 - 1)) & 1;
+        let word = word - (carry << w as i32);
+        wnaf[bit] = sign * word;
+        last_set = bit;
+        bit += now;
+    }
+    (wnaf, last_set + 1)
+}
+
+// ── Table building ────────────────────────────────────────────────────────────
+
+/// Build affine table `[P, 3P, 5P, …, (2·TABLE_SIZE−1)·P]`
+/// using one field inversion (Montgomery batch-inverse trick).
+/// — C: $BASE/ecmult_impl.h  `ecmult_odd_multiples_table` (simplified)
+fn build_odd_multiples_table(a: &Gej) -> [Ge; TABLE_SIZE] {
+    // Compute odd multiples in Jacobian.
+    let two_a = gej_double(a);
+    let mut jac = [*a; TABLE_SIZE];
+    for i in 1..TABLE_SIZE {
+        jac[i] = gej_add_var(&jac[i - 1], &two_a);
+    }
+
+    // Forward pass: products[i] = z[0]·z[1]·…·z[i].
+    let mut products = [Fe { n: [1, 0, 0, 0, 0] }; TABLE_SIZE];
+    products[0] = jac[0].z;
+    for i in 1..TABLE_SIZE {
+        products[i] = fe_mul(&products[i - 1], &jac[i].z);
+    }
+
+    // One inversion of the full product.
+    let mut run_inv = fe_inv(&products[TABLE_SIZE - 1]);
+    run_inv.normalize();
+
+    // Backward pass: derive each z⁻¹ and convert to affine.
+    let inf_ge = Ge {
+        x: Fe { n: [0; 5] },
+        y: Fe { n: [0; 5] },
+        infinity: true,
+    };
+    let mut pre = [inf_ge; TABLE_SIZE];
+    for i in (0..TABLE_SIZE).rev() {
+        let zi = if i > 0 {
+            let zi = fe_mul(&run_inv, &products[i - 1]);
+            run_inv = fe_mul(&run_inv, &jac[i].z);
+            zi
+        } else {
+            run_inv
+        };
+        let zi2 = fe_mul(&zi, &zi);
+        let zi3 = fe_mul(&zi2, &zi);
+        let mut x = fe_mul(&jac[i].x, &zi2);
+        let mut y = fe_mul(&jac[i].y, &zi3);
+        x.normalize_weak();
+        y.normalize_weak();
+        pre[i] = Ge {
+            x,
+            y,
+            infinity: false,
+        };
+    }
+    pre
+}
+
+/// Table lookup: return the entry for odd index `n` (negate y if n < 0).
+/// — C: $BASE/ecmult_impl.h  `ecmult_table_get_ge`
+#[inline(always)]
+fn table_get_ge(pre: &[Ge; TABLE_SIZE], n: i32) -> Ge {
+    debug_assert!(n != 0 && (n & 1) != 0);
+    if n > 0 {
+        pre[((n - 1) / 2) as usize]
+    } else {
+        let idx = ((-n - 1) / 2) as usize;
+        Ge {
+            x: pre[idx].x,
+            y: fe_negate(&pre[idx].y, 1),
+            infinity: false,
+        }
+    }
+}
+
+/// λ-twisted table lookup: x from `aux` (= β·x of pre), y from `pre`.
+/// — C: $BASE/ecmult_impl.h  `ecmult_table_get_ge_lambda`
+#[inline(always)]
+fn table_get_ge_lambda(pre: &[Ge; TABLE_SIZE], aux: &[Fe; TABLE_SIZE], n: i32) -> Ge {
+    debug_assert!(n != 0 && (n & 1) != 0);
+    if n > 0 {
+        let idx = ((n - 1) / 2) as usize;
+        Ge {
+            x: aux[idx],
+            y: pre[idx].y,
+            infinity: false,
+        }
+    } else {
+        let idx = ((-n - 1) / 2) as usize;
+        Ge {
+            x: aux[idx],
+            y: fe_negate(&pre[idx].y, 1),
+            infinity: false,
+        }
+    }
+}
+
+// ── Main Strauss wNAF ecmult ──────────────────────────────────────────────────
+
+/// One-time initialisation: compute pre_g and pre_g128 tables, cached globally.
+/// In the C library these are huge static arrays computed at compile time.
+/// Here we build them once on first call and store in a global OnceLock.
+/// C: $BASE/ecmult_impl.h — `ecmult_odd_multiples_table` over G / 2¹²⁸·G
+fn g_tables() -> &'static ([Ge; TABLE_SIZE], [Ge; TABLE_SIZE]) {
+    static CACHE: OnceLock<([Ge; TABLE_SIZE], [Ge; TABLE_SIZE])> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let g_jac = Gej::set_ge(&G());
+        let pre_g = build_odd_multiples_table(&g_jac);
+        let g128_jac = (0..128u32).fold(g_jac, |acc, _| gej_double(&acc));
+        let pre_g128 = build_odd_multiples_table(&g128_jac);
+        (pre_g, pre_g128)
+    })
+}
+
+/// Compute `u1·G + u2·a` using Strauss wNAF with GLV endomorphism.
+///
+/// Both scalars are decomposed into ~128-bit halves so the main loop runs
+/// ≤ 129 iterations instead of 256, cutting doublings in half.
+///
+/// — C: $BASE/ecmult_impl.h  `ecmult` / `ecmult_strauss_wnaf`
+pub fn ecmult(a: &Gej, u2: &Scalar, u1: &Scalar) -> Gej {
+    // ── GLV split of u2 (the variable-base scalar for A) ───────────────────
+    // na_1 + λ·na_lam ≡ u2 (mod n);  both ≤ 128 bits.
+    let (na_1, na_lam) = scalar_split_lambda(u2);
+
+    // ── Simple split of u1 (the fixed-base scalar for G) ───────────────────
+    // u1 = ng_1 + 2¹²⁸·ng_128;  exact 128-bit halves.
+    let (ng_1, ng_128) = scalar_split_128(u1);
+
+    // ── Build affine tables for A (8 entries each) ──────────────────────────
+    // pre_a[i] = (2i+1)·A   (affine)
+    // aux[i]   = β · pre_a[i].x  (for the λ·A endomorphism points)
+    let pre_a = build_odd_multiples_table(a);
+    let beta = beta_fe();
+    let mut aux = [Fe { n: [0; 5] }; TABLE_SIZE];
+    for i in 0..TABLE_SIZE {
+        aux[i] = fe_mul(&pre_a[i].x, &beta);
+        aux[i].normalize_weak();
+    }
+
+    // ── Fetch cached affine tables for G and 2¹²⁸·G ─────────────────────────
+    // The G tables are constant (G is the secp256k1 generator) and expensive to
+    // build (128 doublings + 1 batch-inversion each), so cache them globally.
+    let (pre_g, pre_g128) = g_tables();
+
+    // ── wNAF for all four ~128-bit scalars ──────────────────────────────────
+    let (wnaf_na1, bits_na1) = ecmult_wnaf(&na_1, WINDOW_A);
+    let (wnaf_nalm, bits_nalm) = ecmult_wnaf(&na_lam, WINDOW_A);
+    let (wnaf_ng1, bits_ng1) = ecmult_wnaf(&ng_1, WINDOW_A);
+    let (wnaf_ng128, bits_ng128) = ecmult_wnaf(&ng_128, WINDOW_A);
+
+    let bits = bits_na1.max(bits_nalm).max(bits_ng1).max(bits_ng128);
+
+    // ── Main loop (high-to-low, ≤ 129 iterations) ──────────────────────────
+    let mut r = Gej::infinity();
+    for i in (0..bits).rev() {
+        r = gej_double(&r);
+
+        if i < bits_na1 {
+            let n = wnaf_na1[i];
+            if n != 0 {
+                r = gej_add_ge_var(&r, &table_get_ge(&pre_a, n));
+            }
+        }
+        if i < bits_nalm {
+            let n = wnaf_nalm[i];
+            if n != 0 {
+                r = gej_add_ge_var(&r, &table_get_ge_lambda(&pre_a, &aux, n));
+            }
+        }
+        if i < bits_ng1 {
+            let n = wnaf_ng1[i];
+            if n != 0 {
+                r = gej_add_ge_var(&r, &table_get_ge(&pre_g, n));
+            }
+        }
+        if i < bits_ng128 {
+            let n = wnaf_ng128[i];
+            if n != 0 {
+                r = gej_add_ge_var(&r, &table_get_ge(&pre_g128, n));
+            }
         }
     }
     r
