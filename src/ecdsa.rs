@@ -1476,6 +1476,18 @@ pub fn bench_mul_wide_adx(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
     unsafe { mul_wide_adx(&U256(a), &U256(b)) }
 }
 
+/// Reduce a 512-bit wide product modulo the field prime p (Solinas reduction).
+#[doc(hidden)]
+pub fn bench_fp_reduce_wide(w: [u64; 8]) -> [u64; 4] {
+    fp_reduce_wide(&w).0
+}
+
+/// Reduce a 512-bit wide product modulo the group order n (N_COMPL folding).
+#[doc(hidden)]
+pub fn bench_fn_reduce_wide(w: [u64; 8]) -> [u64; 4] {
+    fn_reduce_wide(&w).0
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
