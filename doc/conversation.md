@@ -384,3 +384,65 @@ The remaining 2.6× gap vs secp256k1 is attributable to:
   LE representation of n−1.
 
 **Build:** 10/10 tests pass, zero warnings.
+
+---
+
+## Session 5m — fp_sq squaring kernel, fp_half, C-style point_double
+
+**Prompts:**
+1. "use fp_sq where possible"
+2. "look at what the C code does for the multiply in fp_mul"
+3. "implement point_double as in the C code"
+
+**High-level effects (commit 3a7ae60):**
+
+### Dedicated `fp_sq` squaring kernel
+The previous `fp_sq(a)` simply delegated to `fp_mul(a, a)`, computing all 16
+products of a 4×4 schoolbook multiply.  
+A dedicated squaring kernel exploits the symmetry of Aᵀ·A:
+- **Diagonal terms** `aᵢ²` (×4): `muladd(c, aᵢ, aᵢ)` — 1 mul each
+- **Cross-terms** `2·aᵢ·aⱼ` (×6): `muladd2(c, aᵢ, aⱼ)` — 1 mul + left-shift-by-1
+
+Total: **10 `mulq` instead of 16**, followed by the same Solinas fold as `fp_mul`.
+Marked `#[inline(never)]` to give LLVM a wide scheduling window.
+
+### `fp_half` — field halving
+New `#[inline(always)] fn fp_half(a: &U256) -> U256`:
+- If `a` is even: right-shift all 4 limbs by 1 (free).
+- If `a` is odd: add `p` (which is also odd, so `a + p` is even), then shift.
+
+The carry out of bit 255 slides into bit 255 of the result. No multiplications
+required — just one conditional 256-bit add and a 256-bit shift.
+
+### `point_double` ported from secp256k1 `gej_double`
+The dbl-2009-l formula (5 sqr + 2 mul) was replaced by the secp256k1 C
+library's `gej_double` formula (4 sqr + 3 mul), which uses `fp_half` to
+halve the slope:
+
+```
+L  = (3/2)·X₁²   [1 sqr + 3× + half]
+S  = Y₁²          [1 sqr]
+T  = −X₁·S        [1 mul]
+X₃ = L² + 2T      [1 sqr]
+S' = S²            [1 sqr]
+Y₃ = −(L·(X₃+T) + S')  [1 mul]
+Z₃ = Y₁·Z₁        [1 mul]
+```
+
+The formula has slightly shorter latency chains trading one of the cheap
+field squarings for the near-free `fp_half`.
+
+### `fp_mul_8` removed
+The `fp_mul_8` helper (used by the old dbl-2009-l `Y₃` computation) is now
+dead and was deleted.
+
+**Performance:**
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| ECDSA e2e | 57.0 µs | 55.59 µs | −2.5% |
+| fp_mul | 8.00 ns | 8.27 ns | +3% (noise) |
+
+The ECDSA improvement comes entirely from faster squarings: `fp_sq` is called
+in `point_double`, `fp_inv`, `fp_sqrt`, and the main scalar-multiplication loop.
+
+**Build:** 10/10 tests pass, zero warnings.
