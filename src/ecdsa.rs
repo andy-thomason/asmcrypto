@@ -541,8 +541,140 @@ fn fp_mul(a: &U256, b: &U256) -> U256 {
 }
 
 /// Square a field element mod p.
+///
+/// Uses a dedicated squaring kernel that computes only the 10 unique products
+/// of a 4×4 squaring (vs 16 for general multiply), halving the mul count:
+///   diagonal terms    (aᵢ·aᵢ)  × 4  → muladd
+///   cross terms 2·aᵢ·aⱼ (i<j)  × 6  → muladd2 (one mul + left-shift by 1)
+/// The 8-limb result is then folded by the same Solinas pass as fp_mul.
+#[allow(unused_assignments)]
+#[inline(never)]
 fn fp_sq(a: &U256) -> U256 {
-    fp_mul(a, a)
+    let (a0, a1, a2, a3) = (a.0[0], a.0[1], a.0[2], a.0[3]);
+
+    // muladd!(c, x, y)  — (c0,c1,c2) += x*y
+    macro_rules! muladd {
+        ($c0:expr, $c1:expr, $c2:expr, $a:expr, $b:expr) => {{
+            let t = $a as u128 * $b as u128;
+            let tl = t as u64;
+            let th = (t >> 64) as u64;
+            let (x, ov1) = $c0.overflowing_add(tl);
+            $c0 = x;
+            let th = th + ov1 as u64;
+            let (y, ov2) = $c1.overflowing_add(th);
+            $c1 = y;
+            $c2 += ov2 as u64;
+        }};
+    }
+    // muladd2!(c, x, y) — (c0,c1,c2) += 2*x*y  (one multiply + shift)
+    macro_rules! muladd2 {
+        ($c0:expr, $c1:expr, $c2:expr, $a:expr, $b:expr) => {{
+            let t = $a as u128 * $b as u128;
+            let tl = t as u64;
+            let th = (t >> 64) as u64;
+            // 2t = (tl<<1, th<<1 | tl>>63, th>>63)
+            let d0 = tl << 1;
+            let d1 = (th << 1) | (tl >> 63);
+            let top = th >> 63;
+            let (x, ov1) = $c0.overflowing_add(d0);
+            $c0 = x;
+            let (y, ov2) = $c1.overflowing_add(d1);
+            let (y2, ov3) = y.overflowing_add(ov1 as u64);
+            $c1 = y2;
+            $c2 += top + ov2 as u64 + ov3 as u64;
+        }};
+    }
+    macro_rules! extract {
+        ($c0:expr, $c1:expr, $c2:expr) => {{
+            let n = $c0;
+            $c0 = $c1;
+            $c1 = $c2;
+            $c2 = 0;
+            n
+        }};
+    }
+
+    let (mut c0, mut c1, mut c2): (u64, u64, u64) = (0, 0, 0);
+
+    muladd!(c0, c1, c2, a0, a0); // w0 = a0²
+    let w0 = extract!(c0, c1, c2);
+    muladd2!(c0, c1, c2, a0, a1); // w1 = 2·a0·a1
+    let w1 = extract!(c0, c1, c2);
+    muladd!(c0, c1, c2, a1, a1); // w2 = a1² + 2·a0·a2
+    muladd2!(c0, c1, c2, a0, a2);
+    let w2 = extract!(c0, c1, c2);
+    muladd2!(c0, c1, c2, a0, a3); // w3 = 2·(a0·a3 + a1·a2)
+    muladd2!(c0, c1, c2, a1, a2);
+    let w3 = extract!(c0, c1, c2);
+    muladd!(c0, c1, c2, a2, a2); // w4 = a2² + 2·a1·a3
+    muladd2!(c0, c1, c2, a1, a3);
+    let w4 = extract!(c0, c1, c2);
+    muladd2!(c0, c1, c2, a2, a3); // w5 = 2·a2·a3
+    let w5 = extract!(c0, c1, c2);
+    muladd!(c0, c1, c2, a3, a3); // w6 = a3²
+    let w6 = extract!(c0, c1, c2);
+    let w7 = c0; // 0 for any a < 2^256
+
+    // ── Solinas fold: identical to fp_mul ─────────────────────────────────────
+    const K: u128 = (1u128 << 32) + 977;
+    const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFF;
+    let mut r0 = w0 as u128 + w4 as u128 * K;
+    let mut r1 = w1 as u128 + w5 as u128 * K;
+    let mut r2 = w2 as u128 + w6 as u128 * K;
+    let mut r3 = w3 as u128 + w7 as u128 * K;
+    r1 += r0 >> 64;
+    r0 &= MASK;
+    r2 += r1 >> 64;
+    r1 &= MASK;
+    r3 += r2 >> 64;
+    r2 &= MASK;
+    let ov = r3 >> 64;
+    r3 &= MASK;
+    let extra = ov * K;
+    r0 += extra & MASK;
+    r1 += extra >> 64;
+    r1 += r0 >> 64;
+    r0 &= MASK;
+    r2 += r1 >> 64;
+    r1 &= MASK;
+    r3 += r2 >> 64;
+    r2 &= MASK;
+    let mut result = U256([r0 as u64, r1 as u64, r2 as u64, r3 as u64]);
+    if result.ge(&P) {
+        result = result.sbb(&P).0;
+    }
+    if result.ge(&P) {
+        result = result.sbb(&P).0;
+    }
+    result
+}
+
+/// Halve a field element: return a/2 mod p.
+///
+/// Since p is odd, for even a: a/2 = a>>1; for odd a: a/2 = (a+p)>>1.
+/// This is O(1) with no multiplications — just a shift and conditional add.
+#[inline(always)]
+fn fp_half(a: &U256) -> U256 {
+    if a.0[0] & 1 == 0 {
+        // even: shift right 1
+        U256([
+            (a.0[0] >> 1) | (a.0[1] << 63),
+            (a.0[1] >> 1) | (a.0[2] << 63),
+            (a.0[2] >> 1) | (a.0[3] << 63),
+            a.0[3] >> 1,
+        ])
+    } else {
+        // odd: add p (which is odd), making it even, then shift right
+        // the addition may carry out of bit 255; that carry becomes bit 256 which
+        // shifts into bit 255 of the result.
+        let (s, c) = a.adc(&P);
+        U256([
+            (s.0[0] >> 1) | (s.0[1] << 63),
+            (s.0[1] >> 1) | (s.0[2] << 63),
+            (s.0[2] >> 1) | (s.0[3] << 63),
+            (s.0[3] >> 1) | ((c as u64) << 63),
+        ])
+    }
 }
 
 /// Raise `a` to the power `exp` (mod p) via square-and-multiply.
@@ -792,35 +924,34 @@ impl JacobianPoint {
 }
 
 /// Point doubling in Jacobian coordinates.
-/// Uses the formulas from https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-0.html#doubling-dbl-2009-l
-/// (a = 0 for secp256k1).
+///
+/// Direct port of secp256k1 `gej_double` (group_impl.h).
+/// Uses 3 mul + 4 sqr + fp_half (cheap shift) instead of the dbl-2009-l
+/// formula's 2 mul + 5 sqr:
+///
+///   L  = (3/2)·X1²          [1 sqr + mul_int(3) + half]
+///   S  = Y1²                 [1 sqr]
+///   T  = −X1·S               [1 mul]
+///   X3 = L² + 2T             [1 sqr]
+///   S' = S²                  [1 sqr]
+///   Y3 = −(L·(X3+T) + S')   [1 mul]
+///   Z3 = Y1·Z1               [1 mul]
 fn point_double(p: &JacobianPoint) -> JacobianPoint {
     if p.is_infinity() {
         return *p;
     }
-    // A = X1^2, B = Y1^2, C = B^2
-    let a = fp_sq(&p.x);
-    let b = fp_sq(&p.y);
-    let c = fp_sq(&b);
 
-    // D = 2*((X1+B)^2 - A - C)
-    let x1_plus_b = fp_add(&p.x, &b);
-    let d = fp_mul_2(&fp_sub(&fp_sub(&fp_sq(&x1_plus_b), &a), &c));
-
-    // E = 3*A  (since a_coeff = 0)
-    let e = fp_add(&fp_mul_2(&a), &a); // 3A
-
-    // F = E^2
-    let f = fp_sq(&e);
-
-    // X3 = F - 2*D
-    let x3 = fp_sub(&f, &fp_mul_2(&d));
-
-    // Y3 = E*(D - X3) - 8*C
-    let y3 = fp_sub(&fp_mul(&e, &fp_sub(&d, &x3)), &fp_mul_8(&c));
-
-    // Z3 = 2*Y1*Z1
-    let z3 = fp_mul(&fp_mul_2(&p.y), &p.z);
+    let z3 = fp_mul(&p.z, &p.y); // Z3 = Y1·Z1
+    let s = fp_sq(&p.y); // S = Y1²
+    let l = fp_sq(&p.x); // L = X1²
+    // L = (3/2)·X1² = half(3·X1²)
+    let l = fp_half(&fp_add(&fp_add(&l, &l), &l));
+    let t = fp_mul(&fp_neg(&s), &p.x); // T = −X1·S
+    // X3 = L² + 2T
+    let x3 = fp_add(&fp_add(&fp_sq(&l), &t), &t);
+    let ss = fp_sq(&s); // S' = S²
+    // Y3 = −(L·(X3+T) + S')
+    let y3 = fp_neg(&fp_add(&fp_mul(&fp_add(&x3, &t), &l), &ss));
 
     JacobianPoint {
         x: x3,
@@ -1278,11 +1409,6 @@ fn scalar_mul_glv_wnaf(scalar: &U256, px: &U256, py: &U256) -> JacobianPoint {
 #[inline(always)]
 fn fp_mul_2(a: &U256) -> U256 {
     fp_add(a, a)
-}
-
-#[inline(always)]
-fn fp_mul_8(a: &U256) -> U256 {
-    fp_mul_2(&fp_mul_2(&fp_mul_2(a)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
