@@ -34,15 +34,6 @@ const N: U256 = U256([
 // This is the Solinas "correction term" used for fast reduction mod p.
 const K_P: u64 = (1u64 << 32) + 977; // = 4_295_000_977
 
-// 2^256 − n  =  N_COMPL
-// N_COMPL = [0x402DA1732FC9BEBF, 0x4551231950B75FC4, 0x0000000000000001, 0]
-const N_COMPL: U256 = U256([
-    0x402DA1732FC9BEBF,
-    0x4551231950B75FC4,
-    0x0000000000000001,
-    0x0000000000000000,
-]);
-
 // (p + 1) / 4 — used for square-root extraction (since p ≡ 3 mod 4).
 const P_PLUS_ONE_DIV_4: U256 = U256([
     0xFFFFFFFFBFFFFF0C,
@@ -504,6 +495,7 @@ fn fp_neg(a: &U256) -> U256 {
 ///
 /// p = 2^256 − K_P where K_P = 2^32 + 977.
 /// Given wide = lo + hi·2^256, we reduce by replacing hi·2^256 with hi·K_P.
+#[inline(never)]
 fn fp_mul(a: &U256, b: &U256) -> U256 {
     let wide = mul_wide(a, b);
     fp_reduce_wide(&wide)
@@ -613,64 +605,118 @@ fn fn_neg(a: &U256) -> U256 {
 
 /// Multiply two scalars mod n.
 ///
-/// Uses the N_COMPL reduction: since n·N_COMPL = 2^256·N_COMPL − N_COMPL·N_COMPL,
-/// replacing 2^256 with N_COMPL gives convergence in three passes.
+/// Reduction ported verbatim from `secp256k1_scalar_reduce_512` (scalar_4x64_impl.h).
+/// The fn_reduce_wide body is inlined here so LLVM can fuse mul_wide + reduction
+/// into one optimised unit without a separate call boundary.
+#[allow(unused_assignments)] // last extract! in each pass writes c1/c2 which are never re-read
+#[inline(never)]
 fn fn_mul(a: &U256, b: &U256) -> U256 {
     let wide = mul_wide(a, b);
-    fn_reduce_wide(&wide)
-}
 
-/// Reduce an 8-limb (512-bit) number modulo n via iterated N_COMPL folding.
-fn fn_reduce_wide(w: &[u64; 8]) -> U256 {
-    // Start with the low 256 bits.
-    let mut lo = U256([w[0], w[1], w[2], w[3]]);
-    let mut hi = U256([w[4], w[5], w[6], w[7]]);
+    const N_C_0: u64 = 0x402DA1732FC9BEBF;
+    const N_C_1: u64 = 0x4551231950B75FC4;
 
-    // Iteration 1: lo += hi * N_COMPL  (produces up to ~385-bit result)
-    // We compute hi * N_COMPL as a 512-bit product and split off the new hi/lo.
-    for _iter in 0..3 {
-        if hi.is_zero() {
-            break;
-        }
-        let prod = mul_wide(&hi, &N_COMPL);
-        // lo += prod_low (256 bits), accumulating into a 5-limb value
-        let mut acc = [0u128; 5];
-        for i in 0..4 {
-            acc[i] = lo.0[i] as u128 + prod[i] as u128;
-        }
-        // The upper half of prod becomes the new hi.
-        // But first fold the carry from the lower production.
-        for i in 0..4 {
-            acc[i + 1] += acc[i] >> 64;
-            acc[i] &= 0xFFFF_FFFF_FFFF_FFFF;
-        }
-        // acc[4] contains the carry; add it to prod[4..7] to form new hi.
-        let mut hi_acc = [0u128; 4];
-        hi_acc[0] = prod[4] as u128 + acc[4];
-        for i in 1..4 {
-            hi_acc[0 + i] = prod[4 + i] as u128;
-        }
-        for i in 0..3 {
-            hi_acc[i + 1] += hi_acc[i] >> 64;
-            hi_acc[i] &= 0xFFFF_FFFF_FFFF_FFFF;
-        }
-        lo = U256([acc[0] as u64, acc[1] as u64, acc[2] as u64, acc[3] as u64]);
-        hi = U256([
-            hi_acc[0] as u64,
-            hi_acc[1] as u64,
-            hi_acc[2] as u64,
-            hi_acc[3] as u64,
-        ]);
+    macro_rules! muladd {
+        ($c0:expr, $c1:expr, $c2:expr, $a:expr, $b:expr) => {{
+            let t = $a as u128 * $b as u128;
+            let tl = t as u64;
+            let th = (t >> 64) as u64;
+            let (x, ov1) = $c0.overflowing_add(tl);
+            $c0 = x;
+            let th = th + ov1 as u64;
+            let (y, ov2) = $c1.overflowing_add(th);
+            $c1 = y;
+            $c2 += ov2 as u64;
+        }};
+    }
+    macro_rules! sumadd {
+        ($c0:expr, $c1:expr, $c2:expr, $a:expr) => {{
+            let (x, ov) = $c0.overflowing_add($a);
+            $c0 = x;
+            let (y, ov2) = $c1.overflowing_add(ov as u64);
+            $c1 = y;
+            $c2 += ov2 as u64;
+        }};
+    }
+    macro_rules! extract {
+        ($c0:expr, $c1:expr, $c2:expr) => {{
+            let n = $c0;
+            $c0 = $c1;
+            $c1 = $c2;
+            $c2 = 0;
+            n
+        }};
     }
 
-    // At this point lo should be < 2·n.  Apply at most two conditional subtracts.
-    if lo.ge(&N) {
-        lo = lo.sbb(&N).0;
+    let (n0, n1, n2, n3) = (wide[4], wide[5], wide[6], wide[7]);
+
+    // Pass 1: 512 → 385 bits
+    let (mut c0, mut c1, mut c2): (u64, u64, u64) = (wide[0], 0, 0);
+    muladd!(c0, c1, c2, n0, N_C_0);
+    let m0 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, wide[1]);
+    muladd!(c0, c1, c2, n1, N_C_0);
+    muladd!(c0, c1, c2, n0, N_C_1);
+    let m1 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, wide[2]);
+    muladd!(c0, c1, c2, n2, N_C_0);
+    muladd!(c0, c1, c2, n1, N_C_1);
+    sumadd!(c0, c1, c2, n0);
+    let m2 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, wide[3]);
+    muladd!(c0, c1, c2, n3, N_C_0);
+    muladd!(c0, c1, c2, n2, N_C_1);
+    sumadd!(c0, c1, c2, n1);
+    let m3 = extract!(c0, c1, c2);
+    muladd!(c0, c1, c2, n3, N_C_1);
+    sumadd!(c0, c1, c2, n2);
+    let m4 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, n3);
+    let m5 = extract!(c0, c1, c2);
+    let m6 = c0 as u32;
+    debug_assert!(m6 <= 1);
+
+    // Pass 2: 385 → 258 bits
+    c0 = m0;
+    c1 = 0;
+    c2 = 0;
+    muladd!(c0, c1, c2, m4, N_C_0);
+    let p0 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, m1);
+    muladd!(c0, c1, c2, m5, N_C_0);
+    muladd!(c0, c1, c2, m4, N_C_1);
+    let p1 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, m2);
+    muladd!(c0, c1, c2, m6 as u64, N_C_0);
+    muladd!(c0, c1, c2, m5, N_C_1);
+    sumadd!(c0, c1, c2, m4);
+    let p2 = extract!(c0, c1, c2);
+    sumadd!(c0, c1, c2, m3);
+    muladd!(c0, c1, c2, m6 as u64, N_C_1);
+    sumadd!(c0, c1, c2, m5);
+    let p3 = extract!(c0, c1, c2);
+    let p4 = c0 as u32 + m6;
+    debug_assert!(p4 <= 2);
+
+    // Pass 3: 258 → 256 bits
+    let mut t = p0 as u128 + N_C_0 as u128 * p4 as u128;
+    let r0 = t as u64;
+    t >>= 64;
+    t += p1 as u128 + N_C_1 as u128 * p4 as u128;
+    let r1 = t as u64;
+    t >>= 64;
+    t += p2 as u128 + p4 as u128;
+    let r2 = t as u64;
+    t >>= 64;
+    t += p3 as u128;
+    let r3 = t as u64;
+    let carry = (t >> 64) as u64;
+
+    let mut result = U256([r0, r1, r2, r3]);
+    if carry != 0 || result.ge(&N) {
+        result = result.sbb(&N).0;
     }
-    if lo.ge(&N) {
-        lo = lo.sbb(&N).0;
-    }
-    lo
+    result
 }
 
 /// Raise `a` to the power `exp` (mod n) via square-and-multiply.
@@ -1345,10 +1391,10 @@ pub fn bench_fp_reduce_wide(w: [u64; 8]) -> [u64; 4] {
     fp_reduce_wide(&w).0
 }
 
-/// Reduce a 512-bit wide product modulo the group order n (N_COMPL folding).
+/// Compute a scalar multiplication mod n (mul_wide + unrolled reduction).
 #[doc(hidden)]
-pub fn bench_fn_reduce_wide(w: [u64; 8]) -> [u64; 4] {
-    fn_reduce_wide(&w).0
+pub fn bench_fn_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    fn_mul(&U256(a), &U256(b)).0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-use asmcrypto::ecdsa::{bench_fn_reduce_wide, bench_fp_reduce_wide, bench_mul_wide};
+use asmcrypto::ecdsa::{bench_fn_mul, bench_fp_reduce_wide, bench_mul_wide};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // Two non-trivial 256-bit operands (secp256k1 field prime - 1 and group order).
@@ -50,8 +50,8 @@ fn bench_reduce(c: &mut Criterion) {
     g.bench_function("fp_reduce_wide", |b| {
         b.iter(|| bench_fp_reduce_wide(black_box(FP_WIDE)))
     });
-    g.bench_function("fn_reduce_wide", |b| {
-        b.iter(|| bench_fn_reduce_wide(black_box(FN_WIDE)))
+    g.bench_function("fn_mul", |b| {
+        b.iter(|| bench_fn_mul(black_box(A), black_box(B)))
     });
     g.finish();
 }
