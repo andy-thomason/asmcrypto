@@ -30,10 +30,6 @@ const N: U256 = U256([
     0xFFFFFFFFFFFFFFFF,
 ]);
 
-// 2^256 − p  =  K_P  =  2^32 + 977  =  0x1_0000_03D1
-// This is the Solinas "correction term" used for fast reduction mod p.
-const K_P: u64 = (1u64 << 32) + 977; // = 4_295_000_977
-
 // (p + 1) / 4 — used for square-root extraction (since p ≡ 3 mod 4).
 const P_PLUS_ONE_DIV_4: U256 = U256([
     0xFFFFFFFFBFFFFF0C,
@@ -541,46 +537,6 @@ fn fp_mul(a: &U256, b: &U256) -> U256 {
     // a3 >> 64 is 0 by bounded arithmetic (ov < 2^34, extra >> 64 < 4)
 
     let mut r = U256([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
-    if r.ge(&P) {
-        r = r.sbb(&P).0;
-    }
-    if r.ge(&P) {
-        r = r.sbb(&P).0;
-    }
-    r
-}
-
-/// Reduce an 8-limb (512-bit) number modulo p using the Solinas trick.
-fn fp_reduce_wide(w: &[u64; 8]) -> U256 {
-    // Step 1: accumulate lo[0..3] + hi[4..7] * K_P
-    // Use u128 limbs to catch carries naturally.
-    let mut acc = [0u128; 5];
-    for i in 0..4 {
-        acc[i] = w[i] as u128;
-    }
-    for i in 0..4 {
-        acc[i] += w[i + 4] as u128 * K_P as u128;
-    }
-    // Propagate carries through the 5 limbs.
-    for i in 0..4 {
-        acc[i + 1] += acc[i] >> 64;
-        acc[i] &= 0xFFFF_FFFF_FFFF_FFFF;
-    }
-
-    // Step 2: acc[4] still holds an overflow; multiply it by K_P and fold in.
-    let extra = acc[4] * K_P as u128;
-    acc[0] += extra & 0xFFFF_FFFF_FFFF_FFFF;
-    acc[1] += extra >> 64;
-    acc[4] = 0;
-
-    // Propagate again.
-    for i in 0..4 {
-        acc[i + 1] += acc[i] >> 64;
-        acc[i] &= 0xFFFF_FFFF_FFFF_FFFF;
-    }
-
-    let mut r = U256([acc[0] as u64, acc[1] as u64, acc[2] as u64, acc[3] as u64]);
-    // At most two subtractions needed.
     if r.ge(&P) {
         r = r.sbb(&P).0;
     }
@@ -1434,13 +1390,7 @@ pub fn bench_mul_wide(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
     mul_wide(&U256(a), &U256(b))
 }
 
-/// Reduce a 512-bit wide product modulo the field prime p (Solinas reduction).
-#[doc(hidden)]
-pub fn bench_fp_reduce_wide(w: [u64; 8]) -> [u64; 4] {
-    fp_reduce_wide(&w).0
-}
-
-/// Compute a field multiplication mod n (mul_wide + unrolled reduction).
+/// Compute a field multiplication mod p (mul_wide + inlined Solinas reduction).
 #[doc(hidden)]
 pub fn bench_fp_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
     fp_mul(&U256(a), &U256(b)).0

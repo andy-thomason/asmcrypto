@@ -1,4 +1,4 @@
-use asmcrypto::ecdsa::{bench_fn_mul, bench_fp_reduce_wide, bench_mul_wide};
+use asmcrypto::ecdsa::{bench_fn_mul, bench_fp_mul, bench_mul_wide};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // Two non-trivial 256-bit operands (secp256k1 field prime - 1 and group order).
@@ -15,28 +15,6 @@ const B: [u64; 4] = [
     0xFFFFFFFFFFFFFFFF,
 ];
 
-// 512-bit reduction inputs: (p-1)^2 and (n-1)^2.
-const FP_WIDE: [u64; 8] = [
-    0xFFFFFFC200000F84,
-    0xFFFFFFFDFFFFFC2F,
-    0xFFFFFFFFFFFFFFFF,
-    0xFFFFFFFEFFFFFC2E,
-    0xFFFFFFFEFFFFFC2E,
-    0xFFFFFFFFFFFFFFFF,
-    0xFFFFFFFFFFFFFFFF,
-    0xFFFFFFFFFFFFFFFE,
-];
-const FN_WIDE: [u64; 8] = [
-    0x9F13B779F6C5CA82,
-    0xA0D8D9FD5C8D1697,
-    0x51E9E60A7AB90C54,
-    0x74DF4FD0E7D5DAAA,
-    0x40286C57B53F7FC1,
-    0xBAAEDCE6AF48A03B,
-    0xFFFFFFFFFFFFFFFD,
-    0xFFFFFFFFFFFFFFFF,
-];
-
 fn bench_mul(c: &mut Criterion) {
     let mut g = c.benchmark_group("mul_wide");
     g.bench_function("schoolbook", |b| {
@@ -47,8 +25,8 @@ fn bench_mul(c: &mut Criterion) {
 
 fn bench_reduce(c: &mut Criterion) {
     let mut g = c.benchmark_group("reduce");
-    g.bench_function("fp_reduce_wide", |b| {
-        b.iter(|| bench_fp_reduce_wide(black_box(FP_WIDE)))
+    g.bench_function("fp_mul", |b| {
+        b.iter(|| bench_fp_mul(black_box(A), black_box(B)))
     });
     g.bench_function("fn_mul", |b| {
         b.iter(|| bench_fn_mul(black_box(A), black_box(B)))
