@@ -351,3 +351,36 @@ The remaining 2.6× gap vs secp256k1 is attributable to:
 - `point_double` (8 fp_mul currently, no ADX in the doubling formula itself),
 - Jacobian → affine conversion (one 254-step exponentiation, not batched),
 - Solinas reduction in `fp_reduce_wide` (not yet pipelined with the multiply).
+
+---
+
+## Session 5e — Inline fn_reduce_wide into fn_mul; #[inline(never)] on fp_mul
+
+### Prompts
+> Put an inline(never) on fp_mul instead. Manually inline fn_reduce_wide into
+> fn_mul. Change the bench of reduce for a bench of fn_mul.
+
+### High-level effects
+
+**`fn_mul` fully inlined (commit 3671f61):**
+- The previously separate `fn_reduce_wide` function (2-pass unrolled port of
+  the C `secp256k1_scalar_reduce_512`) is now inlined directly inside `fn_mul`.
+- `fn_mul` is marked `#[inline(never)]` so LLVM treats it as a single
+  out-of-line unit, giving the scheduler a large instruction window rather than
+  duplicating the expanded macro body at every call site.
+- `fp_mul` is also marked `#[inline(never)]` for the same reason — it dominates
+  at ~68% of ECDSA cycles according to perf.
+
+**Dead code removed:**
+- The standalone `fn_reduce_wide` function deleted (was 140 lines).
+- `N_COMPL: U256` constant deleted (values inlined as `N_C_0`/`N_C_1` inside
+  the local macros in `fn_mul`).
+
+**Benchmarks updated:**
+- `benches/mul_wide.rs` bench renamed from `fn_reduce_wide` to `fn_mul`
+  (measuring `mul_wide` + full reduction together).
+- `examples/perf_reduce.rs` updated: `bench_fn_reduce_wide(fn_wide)` replaced
+  with `bench_fn_mul(n_minus_1, n_minus_1)` where `n_minus_1` is the 4-limb
+  LE representation of n−1.
+
+**Build:** 10/10 tests pass, zero warnings.
