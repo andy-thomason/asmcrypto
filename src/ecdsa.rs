@@ -487,28 +487,23 @@ fn fp_neg(a: &U256) -> U256 {
     if a.is_zero() { U256::ZERO } else { P.sbb(a).0 }
 }
 
-/// Multiply two field elements mod p using Solinas reduction.
-///
-/// p = 2^256 − K_P where K_P = 2^32 + 977.
-/// Given wide = lo + hi·2^256, we reduce by replacing hi·2^256 with hi·K_P.
 /// Multiply two field elements mod p.
 ///
-/// The Solinas reduction (2^256 ≡ K_P mod p, K_P = 2^32 + 977) is inlined and
+/// The Solinas reduction (2^256 ≡ K mod p, K = 2^32 + 977) is inlined and
 /// fully unrolled so LLVM can schedule mul_wide + both fold passes as a single
 /// unit without a call boundary.
 ///
-/// Algorithm (mirrors secp256k1 field_5x52 reduction logic for 4×64 limbs):
-///   Pass 1: acc[i] = w[i] + w[i+4]*K_P, carry-propagate → 256-bit + ov
-///   Pass 2: fold ov*K_P back into acc[0..1], carry-propagate → 256-bit
+///   Pass 1: acc[i] = w[i] + w[i+4]*K, carry-propagate → 256-bit + ov
+///   Pass 2: fold ov*K back into acc[0..1], carry-propagate → 256-bit
 ///   Final:  at most two conditional subtracts
 #[inline(never)]
 fn fp_mul(a: &U256, b: &U256) -> U256 {
     let w = mul_wide(a, b);
 
-    const K: u128 = (1u128 << 32) + 977; // K_P as u128
+    const K: u128 = (1u128 << 32) + 977;
     const MASK: u128 = 0xFFFF_FFFF_FFFF_FFFF;
 
-    // ── Pass 1: fold w[4..7] using 2^256 ≡ K_P (mod p) ──────────────────────
+    // ── Pass 1: fold w[4..7] using 2^256 ≡ K (mod p) ────────────────────────
     let mut a0 = w[0] as u128 + w[4] as u128 * K;
     let mut a1 = w[1] as u128 + w[5] as u128 * K;
     let mut a2 = w[2] as u128 + w[6] as u128 * K;
@@ -523,7 +518,7 @@ fn fp_mul(a: &U256, b: &U256) -> U256 {
     let ov = a3 >> 64;
     a3 &= MASK;
 
-    // ── Pass 2: fold overflow (ov * K_P < 2^66) ──────────────────────────────
+    // ── Pass 2: fold overflow (ov * K < 2^66) ────────────────────────────────
     let extra = ov * K;
     a0 += extra & MASK;
     a1 += extra >> 64;
@@ -534,7 +529,6 @@ fn fp_mul(a: &U256, b: &U256) -> U256 {
     a1 &= MASK;
     a3 += a2 >> 64;
     a2 &= MASK;
-    // a3 >> 64 is 0 by bounded arithmetic (ov < 2^34, extra >> 64 < 4)
 
     let mut r = U256([a0 as u64, a1 as u64, a2 as u64, a3 as u64]);
     if r.ge(&P) {
