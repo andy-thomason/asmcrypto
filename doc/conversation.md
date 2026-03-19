@@ -784,3 +784,24 @@ The `#[target_feature]` guard is applied to the inner `recover_addresses_avx512`
 - `test_batch_invalid_lane_zeroed` — invalid signature → `[0u8;20]`, valid lanes unaffected
 
 **Total tests:** 30 (was 26).
+
+## Session: bench ecdsa_batch vs secp256k1 C library (commit 89ca2dd)
+
+**Prompt:** benchmark recover_addresses_batch against eight calls to the C library
+
+**Changes:**
+- `benches/ecdsa.rs`: added `bench_ecdsa_batch` criterion group (`ecdsa/recover_address_x8`)
+  with three competitors: `asmcrypto-batch`, `asmcrypto-scalar-x8`, `secp256k1-x8`
+
+**Results (release, criterion, 8-lane batch):**
+
+| Competitor | 8-lane total | per-recovery |
+|---|---|---|
+| asmcrypto-batch (AVX-512 Keccak) | 456 µs | 57 µs |
+| asmcrypto-scalar-x8 | 418 µs | 52 µs |
+| secp256k1 C lib × 8 | 173 µs | 22 µs |
+
+**Analysis:** The C library is ~2.6× faster than our batch path.  Current `ecdsa_batch`
+only vectorises the final Keccak step; the EC scalar-mul still runs 8 independent scalar
+loops.  Fully vectorising the field arithmetic over ZMM registers (8 parallel U256 limb-lanes
+using VPMULLQ + VPMADD52) is the next required step to close the gap.
