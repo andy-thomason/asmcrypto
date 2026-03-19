@@ -3275,19 +3275,19 @@ impl U256 {
 // AVX-512 batch layer: 8 parallel lanes using ZMM registers
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// This layer provides `recover_addresses_avx512` which runs the 8 ecrecover
-// operations through the per-lane `recover_one` kernel but uses AVX-512 for
-// the final Keccak address-derivation step (via `keccak256_batch`), grouping
-// all 8 keccak calls into one vectorised call and saving non-trivial Keccak
-// overhead on top of the EC scalar-mul.
+// `recover_addresses_avx512` is fully vectorised over AVX-512 ZMM registers:
 //
-// A fully-vectorised field-arithmetic layer over ZMM registers would yield
-// an additional ~4–6× throughput gain over what is implemented here, but
-// requires restructuring the entire scalar-mul loop to batch all point
-// operations across 8 lanes simultaneously (no per-lane branch, masked selects).
-// That is left as future work; the present implementation already batches the
-// dominant cost (EC scalar multiplication) through parallelism from the caller
-// while providing a correctly-vectorised Keccak step.
+//   Phase 1a (scalar per-lane): validate r,s; lift r→curve point; compute r⁻¹,
+//            u1 = −z·r⁻¹ (mod n), u2 = s·r⁻¹ (mod n).
+//            Invalid lanes are given dummy values so later vector ops stay safe.
+//
+//   Phase 1b (vectorised): u1·G for all 8 lanes via scalar_mul_g_x8;
+//            u2·R for all 8 lanes via scalar_mul_affine_x8;
+//            sum p1+p2 via pt_add_x8; batch-invert Z via to_affine_x8.
+//
+//   Phase 2 (vectorised): keccak256_batch over all 8 64-byte pubkey buffers.
+//
+//   Phase 3 (scalar): extract 20-byte address from hash; zero invalid lanes.
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512dq,avx512ifma")]
@@ -3297,10 +3297,29 @@ unsafe fn recover_addresses_avx512(
     ss: [&[u8; 32]; 8],
     vs: [u8; 8],
 ) -> [[u8; 20]; 8] {
-    // ── Phase 1: EC point recovery for each lane ──────────────────────────────
-    // Compute u1·G + u2·R for each lane; store uncompressed pubkey XY bytes.
-    let mut pubkey_xys: [[u8; 64]; 8] = [[0u8; 64]; 8];
+    use x8::{load, pt_add_x8, scalar_mul_affine_x8, scalar_mul_g_x8, store, to_affine_x8};
+
+    // ── Phase 1a: per-lane scalar setup ──────────────────────────────────────
+    // Dummy affine point (G) used for invalid lanes so all vector ops are safe.
+    let dummy_x = U256([
+        0x59F2815B16F81798,
+        0x029BFCDB2DCE28D9,
+        0x55A06295CE870B07,
+        0x79BE667EF9DCBBAC,
+    ]);
+    let dummy_y = U256([
+        0x9C47D08FFB10D4B8,
+        0xFD17B448A6855419,
+        0x5DA4FBFC0E1108A8,
+        0x483ADA7726A3C465,
+    ]);
+    let one_n = U256([1, 0, 0, 0]);
+
     let mut valid = [true; 8];
+    let mut u1s = [one_n; 8]; // default 1  → 1·G
+    let mut u2s = [U256([2, 0, 0, 0]); 8]; // default 2  → 2·G; 1·G+2·G=3·G ≠ ∞
+    let mut rx_arr = [dummy_x; 8];
+    let mut ry_arr = [dummy_y; 8];
 
     for lane in 0..8 {
         let r_u = U256::from_be_bytes(rs[lane]);
@@ -3316,10 +3335,9 @@ unsafe fn recover_addresses_avx512(
             continue;
         }
 
-        let r_x = r_u;
-        let r_x3 = scalar_fp_mul(&scalar_fp_sq(&r_x), &r_x);
-        let b7 = U256([7, 0, 0, 0]);
-        let rhs = scalar_fp_add(&r_x3, &b7);
+        // Lift r_x to secp256k1 curve point.
+        let r_x3 = scalar_fp_mul(&scalar_fp_sq(&r_u), &r_u);
+        let rhs = scalar_fp_add(&r_x3, &U256([7, 0, 0, 0]));
         let mut r_y = match scalar_fp_sqrt(&rhs) {
             Some(y) => y,
             None => {
@@ -3338,51 +3356,65 @@ unsafe fn recover_addresses_avx512(
                 continue;
             }
         };
-        let u1 = scalar_fn_neg(&scalar_fn_mul(&z, &r_inv));
-        let u2 = scalar_fn_mul(&s_u, &r_inv);
 
-        let p1 = scalar_mul_g(&u1);
-        let p2 = scalar_mul_affine(&u2, &r_x, &r_y);
+        u1s[lane] = scalar_fn_neg(&scalar_fn_mul(&z, &r_inv));
+        u2s[lane] = scalar_fn_mul(&s_u, &r_inv);
+        rx_arr[lane] = r_u;
+        ry_arr[lane] = r_y;
+    }
 
-        let q = if p1.is_infinity() {
-            p2
-        } else if p2.is_infinity() {
-            p1
-        } else {
-            match p1.to_affine() {
-                Some((p1x, p1y)) => pt_add_mixed(&p2, &p1x, &p1y),
-                None => {
-                    valid[lane] = false;
-                    continue;
+    // ── Phase 1b: vectorised scalar multiplications ───────────────────────────
+    // p1 = u1·G  (8 lanes in parallel via GLV+wNAF over ZMM registers)
+    // p2 = u2·R  (8 lanes in parallel, variable base)
+    // Q  = p1 + p2  (Jacobian + Jacobian, 8 lanes)
+    let mut q_x8 = unsafe {
+        let p1 = scalar_mul_g_x8(u1s);
+        let p2 = scalar_mul_affine_x8(u2s, rx_arr, ry_arr);
+        pt_add_x8(p1, p2)
+    };
+
+    // Guard against Z=0 lanes (Q = ∞, meaning ecrecover failed for that lane).
+    // Replace their Z with 1 so to_affine_x8 doesn't panic; mark invalid.
+    {
+        let zs = unsafe { store(q_x8.z) };
+        let mut any_zero = false;
+        for lane in 0..8 {
+            if zs[lane] == [0u64; 4] {
+                valid[lane] = false;
+                any_zero = true;
+            }
+        }
+        if any_zero {
+            let mut zfix = [[1u64, 0, 0, 0]; 8];
+            for lane in 0..8 {
+                if zs[lane] != [0u64; 4] {
+                    zfix[lane] = zs[lane];
                 }
             }
-        };
-
-        match q.to_affine() {
-            Some((qx, qy)) => {
-                pubkey_xys[lane][0..32].copy_from_slice(&qx.to_be_bytes());
-                pubkey_xys[lane][32..64].copy_from_slice(&qy.to_be_bytes());
-            }
-            None => {
-                valid[lane] = false;
-                continue;
-            }
+            q_x8.z = unsafe { load(&zfix) };
         }
     }
 
+    // Batch Jacobian → affine (Montgomery batch inversion, 1 fp_inv + 21 fp_mul)
+    let aff = unsafe { to_affine_x8(q_x8) };
+
     // ── Phase 2: Batch Keccak-256 of all 8 XY buffers via AVX-512 ────────────
-    // This is the vectorised step: one keccak256_batch call processes all 8
-    // 64-byte pubkey buffers in parallel using 25 ZMM registers.
+    let mut pubkey_xys: [[u8; 64]; 8] = [[0u8; 64]; 8];
+    for lane in 0..8 {
+        if valid[lane] {
+            pubkey_xys[lane][0..32].copy_from_slice(&aff[lane].0.to_be_bytes());
+            pubkey_xys[lane][32..64].copy_from_slice(&aff[lane].1.to_be_bytes());
+        }
+    }
     let inputs: [&[u8]; 8] = std::array::from_fn(|i| pubkey_xys[i].as_slice());
     let hashed = keccak256_batch(inputs);
 
-    // ── Phase 3: Extract addresses from hash outputs ──────────────────────────
+    // ── Phase 3: Extract addresses ────────────────────────────────────────────
     let mut out = [[0u8; 20]; 8];
     for lane in 0..8 {
         if valid[lane] {
             out[lane].copy_from_slice(&hashed[lane][12..]);
         }
-        // invalid lanes remain [0u8; 20]
     }
     out
 }
