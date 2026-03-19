@@ -1019,11 +1019,12 @@ fn scalar_mul_affine(scalar: &U256, px: &U256, py: &U256) -> JacPt {
 
 #[cfg(target_arch = "x86_64")]
 pub mod x8 {
-    #![allow(unsafe_op_in_unsafe_fn)]
+    #![allow(unsafe_op_in_unsafe_fn, unused_imports)]
     use super::{
-        JacPt, P0, P1, P2, P3, U256, pt_double, scalar_fn_inv, scalar_fn_mul, scalar_fn_neg,
-        scalar_fp_add, scalar_fp_inv, scalar_fp_mul, scalar_fp_neg, scalar_fp_sq, scalar_fp_sqrt,
-        scalar_fp_sub,
+        JacPt, P0, P1, P2, P3, S129, SCALAR_BETA, U256, build_table, g_table_lookup, glv_decompose,
+        phi_g_table_lookup, pt_double, pt_neg, scalar_fn_inv, scalar_fn_mul, scalar_fn_neg,
+        scalar_fn_sub, scalar_fp_add, scalar_fp_inv, scalar_fp_mul, scalar_fp_neg, scalar_fp_sq,
+        scalar_fp_sqrt, scalar_fp_sub, scalar_mul_affine, scalar_mul_g, table_get, wnaf_129,
     };
     use core::arch::x86_64::*;
 
@@ -2070,6 +2071,486 @@ pub mod x8 {
         }
     }
 
+    // ── Jacobian blend helper ─────────────────────────────────────────────────
+
+    /// Blend two `U256x8` values element-wise.
+    ///
+    /// For each lane `i`: if `mask` bit `i` is **1** → take `on_true[i]`;
+    /// otherwise → take `on_false[i]`.
+    ///
+    /// # Safety
+    /// Requires `avx512f`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn blend_x8(mask: __mmask8, on_true: U256x8, on_false: U256x8) -> U256x8 {
+        U256x8 {
+            limbs: core::array::from_fn(|k| {
+                _mm512_mask_blend_epi64(mask, on_false.limbs[k], on_true.limbs[k])
+            }),
+        }
+    }
+
+    /// Blend two `JacPtx8` values lane-wise.
+    ///
+    /// Mask bit `i` = 1 → use `on_true`'s lane `i`, otherwise `on_false`'s lane `i`.
+    ///
+    /// # Safety
+    /// Requires `avx512f`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn blend_jacpt_x8(mask: __mmask8, on_true: JacPtx8, on_false: JacPtx8) -> JacPtx8 {
+        JacPtx8 {
+            x: blend_x8(mask, on_true.x, on_false.x),
+            y: blend_x8(mask, on_true.y, on_false.y),
+            z: blend_x8(mask, on_true.z, on_false.z),
+        }
+    }
+
+    // ── Mixed Jacobian+affine add (8 lanes) ──────────────────────────────────
+
+    /// Add affine points `(qx, qy)` to Jacobian points `p` for all 8 lanes.
+    ///
+    /// Uses madd-2007-bl (Z₂=1 specialisation):
+    ///
+    /// ```text
+    /// Z1Z1 = Z1²
+    /// U2   = X2 · Z1Z1
+    /// S2   = Y2 · Z1 · Z1Z1
+    /// H    = U2 − X1            R = 2·(S2 − Y1)
+    /// HH   = H²                 I = 4·HH          J = H·I
+    /// V    = X1·I
+    /// X3   = R² − J − 2V
+    /// Y3   = R·(V−X3) − 2·Y1·J
+    /// Z3   = (Z1 + H)² − Z1Z1 − HH
+    /// ```
+    ///
+    /// **Infinity:** if lane has `Z1 = 0`, the result for that lane is `(qx, qy, 1)`.
+    ///
+    /// Cost: 4 squarings + 4 multiplications.
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn pt_add_mixed_x8(p: JacPtx8, qx: U256x8, qy: U256x8) -> JacPtx8 {
+        let JacPtx8 {
+            x: x1,
+            y: y1,
+            z: z1,
+        } = p;
+
+        // Lanes where Z1=0 (point at infinity): OR all 5 limbs, then compare to zero.
+        let z1_or = _mm512_or_epi64(
+            z1.limbs[0],
+            _mm512_or_epi64(
+                z1.limbs[1],
+                _mm512_or_epi64(z1.limbs[2], _mm512_or_epi64(z1.limbs[3], z1.limbs[4])),
+            ),
+        );
+        let z1_zero: __mmask8 = _mm512_cmpeq_epi64_mask(z1_or, _mm512_setzero_si512());
+
+        // Z1Z1 = Z1²
+        let z1z1 = fp_sq_x8(z1);
+        // U2 = X2·Z1Z1;  S2 = Y2·Z1·Z1Z1
+        let u2 = fp_mul_x8(qx, z1z1);
+        let z1_cub = fp_mul_x8(z1, z1z1);
+        let s2 = fp_mul_x8(qy, z1_cub);
+        // H = U2 − X1;   R = 2·(S2 − Y1)
+        let h = fp_sub_x8(u2, x1);
+        let r_half = fp_sub_x8(s2, y1);
+        let r = fp_add_x8(r_half, r_half);
+        // HH = H²;  I = 4·HH;  J = H·I
+        let hh = fp_sq_x8(h);
+        let i_val = fp_add_x8(fp_add_x8(hh, hh), fp_add_x8(hh, hh));
+        let j = fp_mul_x8(h, i_val);
+        // V = X1·I;  X3 = R² − J − 2V
+        let v = fp_mul_x8(x1, i_val);
+        let x3 = fp_sub_x8(fp_sub_x8(fp_sq_x8(r), j), fp_add_x8(v, v));
+        // Y3 = R·(V−X3) − 2·Y1·J
+        let y1j = fp_mul_x8(y1, j);
+        let y3 = fp_sub_x8(fp_mul_x8(r, fp_sub_x8(v, x3)), fp_add_x8(y1j, y1j));
+        // Z3 = (Z1+H)² − Z1Z1 − HH
+        let z3 = fp_sub_x8(fp_sub_x8(fp_sq_x8(fp_add_x8(z1, h)), z1z1), hh);
+
+        let res = JacPtx8 {
+            x: x3,
+            y: y3,
+            z: z3,
+        };
+
+        // For Z1=0 lanes: return (qx, qy, 1).
+        if z1_zero == 0 {
+            return res;
+        }
+        let one_52 = U256x8 {
+            limbs: [
+                _mm512_set1_epi64(1),
+                _mm512_setzero_si512(),
+                _mm512_setzero_si512(),
+                _mm512_setzero_si512(),
+                _mm512_setzero_si512(),
+            ],
+        };
+        let q_jac = JacPtx8 {
+            x: qx,
+            y: qy,
+            z: one_52,
+        };
+        blend_jacpt_x8(z1_zero, q_jac, res)
+    }
+
+    // ── Full Jacobian + Jacobian add (8 lanes) ────────────────────────────────
+
+    /// Add two Jacobian points `p` and `q` for all 8 lanes.
+    ///
+    /// Uses add-2007-bl:
+    ///
+    /// ```text
+    /// Z1Z1 = Z1²;  Z2Z2 = Z2²
+    /// U1 = X1·Z2Z2;  U2 = X2·Z1Z1
+    /// S1 = Y1·Z2·Z2Z2;  S2 = Y2·Z1·Z1Z1
+    /// H = U2 − U1;  R = 2·(S2 − S1)
+    /// HH = H²;  I = 4·HH;  J = H·I
+    /// V = U1·I
+    /// X3 = R² − J − 2V
+    /// Y3 = R·(V−X3) − 2·S1·J
+    /// Z3 = ((Z1+Z2)² − Z1Z1 − Z2Z2)·H
+    /// ```
+    ///
+    /// **Infinity:** if `Z1=0` (lane is ∞) the result is `q`; if `Z2=0` the result is `p`.
+    ///
+    /// Cost: 6 squarings + 7 multiplications.
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn pt_add_x8(p: JacPtx8, q: JacPtx8) -> JacPtx8 {
+        let JacPtx8 {
+            x: x1,
+            y: y1,
+            z: z1,
+        } = p;
+        let JacPtx8 {
+            x: x2,
+            y: y2,
+            z: z2,
+        } = q;
+
+        // Detect infinite lanes.
+        let or5 = |v: U256x8| {
+            _mm512_or_epi64(
+                v.limbs[0],
+                _mm512_or_epi64(
+                    v.limbs[1],
+                    _mm512_or_epi64(v.limbs[2], _mm512_or_epi64(v.limbs[3], v.limbs[4])),
+                ),
+            )
+        };
+        let zero512 = _mm512_setzero_si512();
+        let z1_zero: __mmask8 = _mm512_cmpeq_epi64_mask(or5(z1), zero512);
+        let z2_zero: __mmask8 = _mm512_cmpeq_epi64_mask(or5(z2), zero512);
+
+        // Z1Z1 = Z1²;  Z2Z2 = Z2²
+        let z1z1 = fp_sq_x8(z1);
+        let z2z2 = fp_sq_x8(z2);
+        // U1 = X1·Z2Z2;  U2 = X2·Z1Z1
+        let u1 = fp_mul_x8(x1, z2z2);
+        let u2 = fp_mul_x8(x2, z1z1);
+        // S1 = Y1·Z2·Z2Z2;  S2 = Y2·Z1·Z1Z1
+        let s1 = fp_mul_x8(y1, fp_mul_x8(z2, z2z2));
+        let s2 = fp_mul_x8(y2, fp_mul_x8(z1, z1z1));
+        // H = U2 − U1;  R = 2·(S2 − S1)
+        let h = fp_sub_x8(u2, u1);
+        let r_half = fp_sub_x8(s2, s1);
+        let r = fp_add_x8(r_half, r_half);
+        // HH = H²;  I = 4·HH;  J = H·I
+        let hh = fp_sq_x8(h);
+        let i_val = fp_add_x8(fp_add_x8(hh, hh), fp_add_x8(hh, hh));
+        let j = fp_mul_x8(h, i_val);
+        // V = U1·I;  X3 = R² − J − 2V
+        let v = fp_mul_x8(u1, i_val);
+        let x3 = fp_sub_x8(fp_sub_x8(fp_sq_x8(r), j), fp_add_x8(v, v));
+        // Y3 = R·(V−X3) − 2·S1·J
+        let s1j = fp_mul_x8(s1, j);
+        let y3 = fp_sub_x8(fp_mul_x8(r, fp_sub_x8(v, x3)), fp_add_x8(s1j, s1j));
+        // Z3 = ((Z1+Z2)² − Z1Z1 − Z2Z2)·H
+        let z3 = fp_mul_x8(
+            fp_sub_x8(fp_sub_x8(fp_sq_x8(fp_add_x8(z1, z2)), z1z1), z2z2),
+            h,
+        );
+
+        let res = JacPtx8 {
+            x: x3,
+            y: y3,
+            z: z3,
+        };
+        // Infinity propagation: Z2=0 → return p; Z1=0 → return q.
+        // (If both zero, z1_zero overrides and returns q which also has Z=0 → correct.)
+        let after_z2 = blend_jacpt_x8(z2_zero, p, res);
+        blend_jacpt_x8(z1_zero, q, after_z2)
+    }
+
+    // ── 8-lane GLV+wNAF scalar multiplication by G ────────────────────────────
+
+    /// Compute `scalars[i] · G` for all 8 lanes simultaneously.
+    ///
+    /// Uses GLV decomposition and a width-5 wNAF loop identical to the scalar
+    /// `scalar_mul_g`, but the doubling and mixed-add steps run over all 8 lanes
+    /// in parallel using `pt_double_x8` / `pt_add_mixed_x8`.
+    ///
+    /// The table lookup (per NAF digit, per GLV component) is a small scalar
+    /// gather (8 × a table of 8 affine points) kept entirely in L1 cache.
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn scalar_mul_g_x8(scalars: [U256; 8]) -> JacPtx8 {
+        // ── GLV decomposition for all 8 scalars ──────────────────────────────
+        let dummy_s129 = S129 {
+            mag: 0,
+            hi: false,
+            neg: false,
+        };
+        let mut k1s = [dummy_s129; 8];
+        let mut k2s = [dummy_s129; 8];
+        for i in 0..8 {
+            let (k1, k2) = glv_decompose(&scalars[i]);
+            k1s[i] = k1;
+            k2s[i] = k2;
+        }
+
+        // ── wNAF (width 5) for both GLV halves ───────────────────────────────
+        let mut naf1 = [[0i8; 131]; 8];
+        let mut naf2 = [[0i8; 131]; 8];
+        for i in 0..8 {
+            naf1[i] = wnaf_129(k1s[i].mag, k1s[i].hi);
+            naf2[i] = wnaf_129(k2s[i].mag, k2s[i].hi);
+        }
+
+        // ── Main doubling-and-add loop ────────────────────────────────────────
+        let zero8 = U256x8 {
+            limbs: [_mm512_setzero_si512(); 5],
+        };
+        let mut acc = JacPtx8 {
+            x: zero8,
+            y: zero8,
+            z: zero8,
+        };
+
+        let dummy_pt = [1u64, 0, 0, 0]; // affine dummy (never used when mask=0)
+
+        for bit in (0..131usize).rev() {
+            acc = pt_double_x8(acc);
+
+            // ── Component 1: G table (affine, precomputed) ────────────────
+            let mut add_mask1: u8 = 0;
+            let mut qx1 = [dummy_pt; 8];
+            let mut qy1 = [dummy_pt; 8];
+            for lane in 0..8 {
+                let d = naf1[lane][bit];
+                if d != 0 {
+                    add_mask1 |= 1 << lane;
+                    let (qx, qy) = g_table_lookup(d, k1s[lane].neg);
+                    qx1[lane] = qx.0;
+                    qy1[lane] = qy.0;
+                }
+            }
+            if add_mask1 != 0 {
+                let new_acc = pt_add_mixed_x8(acc, load(&qx1), load(&qy1));
+                acc = blend_jacpt_x8(add_mask1, new_acc, acc);
+            }
+
+            // ── Component 2: ϕ(G) table (affine, precomputed) ────────────
+            let mut add_mask2: u8 = 0;
+            let mut qx2 = [dummy_pt; 8];
+            let mut qy2 = [dummy_pt; 8];
+            for lane in 0..8 {
+                let d = naf2[lane][bit];
+                if d != 0 {
+                    add_mask2 |= 1 << lane;
+                    let (qx, qy) = phi_g_table_lookup(d, k2s[lane].neg);
+                    qx2[lane] = qx.0;
+                    qy2[lane] = qy.0;
+                }
+            }
+            if add_mask2 != 0 {
+                let new_acc = pt_add_mixed_x8(acc, load(&qx2), load(&qy2));
+                acc = blend_jacpt_x8(add_mask2, new_acc, acc);
+            }
+        }
+        acc
+    }
+
+    // ── 8-lane GLV+wNAF scalar multiplication by a variable affine point ──────
+
+    /// Compute `scalars[i] · (px[i], py[i])` for all 8 lanes simultaneously.
+    ///
+    /// Each lane has its own affine base point, so per-lane Jacobian wNAF tables
+    /// are built in scalar code and the doubling / Jacobian-add steps run over
+    /// all 8 lanes in parallel.
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn scalar_mul_affine_x8(
+        scalars: [U256; 8],
+        px_arr: [U256; 8],
+        py_arr: [U256; 8],
+    ) -> JacPtx8 {
+        // ── GLV decomposition ─────────────────────────────────────────────────
+        let dummy_s129 = S129 {
+            mag: 0,
+            hi: false,
+            neg: false,
+        };
+        let mut k1s = [dummy_s129; 8];
+        let mut k2s = [dummy_s129; 8];
+        for i in 0..8 {
+            let (k1, k2) = glv_decompose(&scalars[i]);
+            k1s[i] = k1;
+            k2s[i] = k2;
+        }
+
+        // ── wNAF ─────────────────────────────────────────────────────────────
+        let mut naf1 = [[0i8; 131]; 8];
+        let mut naf2 = [[0i8; 131]; 8];
+        for i in 0..8 {
+            naf1[i] = wnaf_129(k1s[i].mag, k1s[i].hi);
+            naf2[i] = wnaf_129(k2s[i].mag, k2s[i].hi);
+        }
+
+        // ── Build per-lane Jacobian wNAF tables (scalar) ──────────────────────
+        let inf = JacPt::infinity();
+        let mut tables1 = [[inf; 8]; 8]; // tables1[lane][entry]
+        let mut tables2 = [[inf; 8]; 8];
+        for lane in 0..8 {
+            let p1_base = if k1s[lane].neg {
+                JacPt::from_affine(px_arr[lane], scalar_fp_neg(&py_arr[lane]))
+            } else {
+                JacPt::from_affine(px_arr[lane], py_arr[lane])
+            };
+            let phi_x = scalar_fp_mul(&px_arr[lane], &SCALAR_BETA);
+            let phi_p = JacPt::from_affine(phi_x, py_arr[lane]);
+            let p2_base = if k2s[lane].neg { pt_neg(&phi_p) } else { phi_p };
+            tables1[lane] = build_table(&p1_base);
+            tables2[lane] = build_table(&p2_base);
+        }
+
+        // ── Main doubling-and-add loop ────────────────────────────────────────
+        let zero8 = U256x8 {
+            limbs: [_mm512_setzero_si512(); 5],
+        };
+        let mut acc = JacPtx8 {
+            x: zero8,
+            y: zero8,
+            z: zero8,
+        };
+
+        let dummy_u256 = [1u64, 0, 0, 0]; // dummy, used for mask=0 lanes
+
+        for bit in (0..131usize).rev() {
+            acc = pt_double_x8(acc);
+
+            // ── Component 1: per-lane Jacobian table ──────────────────────
+            let mut add_mask1: u8 = 0;
+            let mut tx1 = [dummy_u256; 8];
+            let mut ty1 = [dummy_u256; 8];
+            let mut tz1 = [dummy_u256; 8];
+            for lane in 0..8 {
+                let d = naf1[lane][bit];
+                if d != 0 {
+                    add_mask1 |= 1 << lane;
+                    let jpt = table_get(&tables1[lane], d);
+                    tx1[lane] = jpt.x.0;
+                    ty1[lane] = jpt.y.0;
+                    tz1[lane] = jpt.z.0;
+                }
+            }
+            if add_mask1 != 0 {
+                let q8 = JacPtx8 {
+                    x: load(&tx1),
+                    y: load(&ty1),
+                    z: load(&tz1),
+                };
+                let new_acc = pt_add_x8(acc, q8);
+                acc = blend_jacpt_x8(add_mask1, new_acc, acc);
+            }
+
+            // ── Component 2: per-lane Jacobian table (ϕ component) ────────
+            let mut add_mask2: u8 = 0;
+            let mut tx2 = [dummy_u256; 8];
+            let mut ty2 = [dummy_u256; 8];
+            let mut tz2 = [dummy_u256; 8];
+            for lane in 0..8 {
+                let d = naf2[lane][bit];
+                if d != 0 {
+                    add_mask2 |= 1 << lane;
+                    let jpt = table_get(&tables2[lane], d);
+                    tx2[lane] = jpt.x.0;
+                    ty2[lane] = jpt.y.0;
+                    tz2[lane] = jpt.z.0;
+                }
+            }
+            if add_mask2 != 0 {
+                let q8 = JacPtx8 {
+                    x: load(&tx2),
+                    y: load(&ty2),
+                    z: load(&tz2),
+                };
+                let new_acc = pt_add_x8(acc, q8);
+                acc = blend_jacpt_x8(add_mask2, new_acc, acc);
+            }
+        }
+        acc
+    }
+
+    // ── Batch affine conversion ───────────────────────────────────────────────
+
+    /// Convert 8 Jacobian points to affine `(x, y)` pairs.
+    ///
+    /// Uses Montgomery's batch-inversion trick: one `scalar_fp_inv` call
+    /// amortised over all 8 Z-coordinates (3·7 = 21 field multiplications + 1
+    /// inversion total, vs 8 individual inversions).
+    ///
+    /// # Panics
+    /// Panics if any lane has `Z = 0` (i.e., is the point at infinity).
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn to_affine_x8(p: JacPtx8) -> [(U256, U256); 8] {
+        let zs_raw = store(p.z);
+        let zs: [U256; 8] = core::array::from_fn(|i| U256(zs_raw[i]));
+
+        // Prefix products: prefix[0] = z0, prefix[k] = z0·z1·…·zk
+        let mut prefix = [U256([1, 0, 0, 0]); 8];
+        prefix[0] = zs[0];
+        for i in 1..8 {
+            prefix[i] = scalar_fp_mul(&prefix[i - 1], &zs[i]);
+        }
+
+        // Invert the full product.
+        let inv_all = scalar_fp_inv(&prefix[7]).expect("to_affine_x8: Z=0 (infinity) lane");
+
+        // Unroll suffixes: inv_z[i] = 1/z_i.
+        let mut inv_z = [U256([1, 0, 0, 0]); 8];
+        let mut running = inv_all;
+        for i in (1..8).rev() {
+            inv_z[i] = scalar_fp_mul(&running, &prefix[i - 1]);
+            running = scalar_fp_mul(&running, &zs[i]);
+        }
+        inv_z[0] = running;
+
+        let xs_raw = store(p.x);
+        let ys_raw = store(p.y);
+        core::array::from_fn(|i| {
+            let zi = inv_z[i];
+            let z2 = scalar_fp_sq(&zi);
+            let z3 = scalar_fp_mul(&z2, &zi);
+            (
+                scalar_fp_mul(&U256(xs_raw[i]), &z2),
+                scalar_fp_mul(&U256(ys_raw[i]), &z3),
+            )
+        })
+    }
+
     // ── Tests ─────────────────────────────────────────────────────────────────
     #[cfg(test)]
     mod tests_x8 {
@@ -2476,6 +2957,231 @@ pub mod x8 {
                         "fn_inv_x8: a * inv(a) != 1 at lane {lane}"
                     );
                 }
+            }
+        }
+
+        // ── Helpers shared by point tests ─────────────────────────────────────
+
+        /// Jacobian → affine for a single lane using scalar field ops.
+        fn jac_to_affine(rx: [u64; 4], ry: [u64; 4], rz: [u64; 4]) -> (U256, U256) {
+            let z = U256(rz);
+            let zi = scalar_fp_inv(&z).expect("z should be nonzero");
+            let z2 = scalar_fp_sq(&zi);
+            let z3 = scalar_fp_mul(&z2, &zi);
+            (scalar_fp_mul(&U256(rx), &z2), scalar_fp_mul(&U256(ry), &z3))
+        }
+
+        fn gx() -> U256 {
+            U256([
+                0x59F2815B16F81798,
+                0x029BFCDB2DCE28D9,
+                0x55A06295CE870B07,
+                0x79BE667EF9DCBBAC,
+            ])
+        }
+        fn gy() -> U256 {
+            U256([
+                0x9C47D08FFB10D4B8,
+                0xFD17B448A6855419,
+                0x5DA4FBFC0E1108A8,
+                0x483ADA7726A3C465,
+            ])
+        }
+
+        // ── pt_add_mixed_x8 ───────────────────────────────────────────────────
+
+        /// pt_add_mixed_x8: G(Jacobian, Z=1) + 3G(affine) = 4G, all 8 lanes.
+        #[test]
+        fn test_pt_add_mixed_x8_matches_scalar() {
+            if !check_avx512() {
+                return;
+            }
+            // 3G from G_TABLE[1]
+            let three_gx = U256([
+                0x8601F113BCE036F9,
+                0xB531C845836F99B0,
+                0x49344F85F89D5229,
+                0xF9308A019258C310,
+            ]);
+            let three_gy = U256([
+                0x6CB9FD7584B8E672,
+                0x6500A99934C2231B,
+                0x0FE337E62A37F356,
+                0x388F7B0F632DE814,
+            ]);
+
+            // Scalar reference: 4G = 2·(2·G)
+            let g_jac = JacPt::from_affine(gx(), gy());
+            let two_g = pt_double(&g_jac);
+            let four_g = pt_double(&two_g);
+            let (ref_x, ref_y) = four_g.to_affine().expect("4G not infinity");
+
+            // Vectorised: G as Jacobian (Z=1) + 3G affine
+            let one = [1u64, 0, 0, 0];
+            let p8 = JacPtx8 {
+                x: unsafe { load(&[gx().0; 8]) },
+                y: unsafe { load(&[gy().0; 8]) },
+                z: unsafe { load(&[one; 8]) },
+            };
+            let qx8 = unsafe { load(&[three_gx.0; 8]) };
+            let qy8 = unsafe { load(&[three_gy.0; 8]) };
+            let r8 = unsafe { pt_add_mixed_x8(p8, qx8, qy8) };
+            let rxs = unsafe { store(r8.x) };
+            let rys = unsafe { store(r8.y) };
+            let rzs = unsafe { store(r8.z) };
+            for lane in 0..8 {
+                let (ax, ay) = jac_to_affine(rxs[lane], rys[lane], rzs[lane]);
+                assert_eq!(ax, ref_x, "pt_add_mixed_x8 x mismatch at lane {lane}");
+                assert_eq!(ay, ref_y, "pt_add_mixed_x8 y mismatch at lane {lane}");
+            }
+
+            // Infinity propagation: Z=0 input → result == q (3G in Jacobian form)
+            let zero_pt = JacPtx8 {
+                x: unsafe { load(&[[0u64; 4]; 8]) },
+                y: unsafe { load(&[[0u64; 4]; 8]) },
+                z: unsafe { load(&[[0u64; 4]; 8]) },
+            };
+            let r_inf = unsafe { pt_add_mixed_x8(zero_pt, qx8, qy8) };
+            let rx_inf = unsafe { store(r_inf.x) };
+            let ry_inf = unsafe { store(r_inf.y) };
+            let rz_inf = unsafe { store(r_inf.z) };
+            let (ref3_x, ref3_y) = (three_gx, three_gy);
+            for lane in 0..8 {
+                let (ax, ay) = jac_to_affine(rx_inf[lane], ry_inf[lane], rz_inf[lane]);
+                assert_eq!(
+                    ax, ref3_x,
+                    "pt_add_mixed_x8 infinity x mismatch at lane {lane}"
+                );
+                assert_eq!(
+                    ay, ref3_y,
+                    "pt_add_mixed_x8 infinity y mismatch at lane {lane}"
+                );
+            }
+        }
+
+        // ── pt_add_x8 ─────────────────────────────────────────────────────────
+
+        /// pt_add_x8: G(Jacobian) + 2G(Jacobian) = 3G, all 8 lanes.
+        #[test]
+        fn test_pt_add_x8_matches_scalar() {
+            if !check_avx512() {
+                return;
+            }
+            // Reference: 3G from the precomputed G_TABLE (odd multiple 3 = index 1).
+            let ref_x = U256([
+                0x8601F113BCE036F9,
+                0xB531C845836F99B0,
+                0x49344F85F89D5229,
+                0xF9308A019258C310,
+            ]);
+            let ref_y = U256([
+                0x6CB9FD7584B8E672,
+                0x6500A99934C2231B,
+                0x0FE337E62A37F356,
+                0x388F7B0F632DE814,
+            ]);
+
+            // G as Jacobian (Z=1), 2G as Jacobian from pt_double_x8.
+            let one = [1u64, 0, 0, 0];
+            let g_x8 = JacPtx8 {
+                x: unsafe { load(&[gx().0; 8]) },
+                y: unsafe { load(&[gy().0; 8]) },
+                z: unsafe { load(&[one; 8]) },
+            };
+            let two_g_x8 = unsafe { pt_double_x8(g_x8) };
+
+            let r8 = unsafe { pt_add_x8(g_x8, two_g_x8) };
+            let rxs = unsafe { store(r8.x) };
+            let rys = unsafe { store(r8.y) };
+            let rzs = unsafe { store(r8.z) };
+            for lane in 0..8 {
+                let (ax, ay) = jac_to_affine(rxs[lane], rys[lane], rzs[lane]);
+                assert_eq!(ax, ref_x, "pt_add_x8 x mismatch at lane {lane}");
+                assert_eq!(ay, ref_y, "pt_add_x8 y mismatch at lane {lane}");
+            }
+        }
+
+        // ── scalar_mul_g_x8 ───────────────────────────────────────────────────
+
+        /// scalar_mul_g_x8 matches scalar_mul_g on 8 distinct scalars.
+        #[test]
+        fn test_scalar_mul_g_x8_matches_scalar() {
+            if !check_avx512() {
+                return;
+            }
+            // 8 distinct small multiples: 1G … 8G
+            let scalars: [U256; 8] = core::array::from_fn(|i| U256([(i + 1) as u64, 0, 0, 0]));
+
+            // Scalar references
+            let refs: [(U256, U256); 8] = core::array::from_fn(|i| {
+                scalar_mul_g(&scalars[i])
+                    .to_affine()
+                    .expect("k·G not infinity")
+            });
+
+            // Vectorised
+            let r8 = unsafe { scalar_mul_g_x8(scalars) };
+            let aff = unsafe { to_affine_x8(r8) };
+            for lane in 0..8 {
+                assert_eq!(
+                    aff[lane].0, refs[lane].0,
+                    "scalar_mul_g_x8 x mismatch at lane {lane}"
+                );
+                assert_eq!(
+                    aff[lane].1, refs[lane].1,
+                    "scalar_mul_g_x8 y mismatch at lane {lane}"
+                );
+            }
+        }
+
+        // ── scalar_mul_affine_x8 ──────────────────────────────────────────────
+
+        /// scalar_mul_affine_x8 matches scalar_mul_affine: 8 lanes, two base points.
+        #[test]
+        fn test_scalar_mul_affine_x8_matches_scalar() {
+            if !check_avx512() {
+                return;
+            }
+            // Use G and 3G as base points, alternating across the 8 lanes.
+            let three_gx = U256([
+                0x8601F113BCE036F9,
+                0xB531C845836F99B0,
+                0x49344F85F89D5229,
+                0xF9308A019258C310,
+            ]);
+            let three_gy = U256([
+                0x6CB9FD7584B8E672,
+                0x6500A99934C2231B,
+                0x0FE337E62A37F356,
+                0x388F7B0F632DE814,
+            ]);
+
+            let base_xs: [U256; 8] =
+                core::array::from_fn(|i| if i % 2 == 0 { gx() } else { three_gx });
+            let base_ys: [U256; 8] =
+                core::array::from_fn(|i| if i % 2 == 0 { gy() } else { three_gy });
+
+            let scalars: [U256; 8] = core::array::from_fn(|i| U256([(i + 2) as u64, 0, 0, 0]));
+
+            // Scalar references
+            let refs: [(U256, U256); 8] = core::array::from_fn(|i| {
+                scalar_mul_affine(&scalars[i], &base_xs[i], &base_ys[i])
+                    .to_affine()
+                    .expect("k·P not infinity")
+            });
+
+            // Vectorised
+            let r8 = unsafe { scalar_mul_affine_x8(scalars, base_xs, base_ys) };
+            let aff = unsafe { to_affine_x8(r8) };
+            for lane in 0..8 {
+                assert_eq!(
+                    aff[lane].0, refs[lane].0,
+                    "scalar_mul_affine_x8 x mismatch at lane {lane}"
+                );
+                assert_eq!(
+                    aff[lane].1, refs[lane].1,
+                    "scalar_mul_affine_x8 y mismatch at lane {lane}"
+                );
             }
         }
     }
