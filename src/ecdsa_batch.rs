@@ -1020,7 +1020,10 @@ fn scalar_mul_affine(scalar: &U256, px: &U256, py: &U256) -> JacPt {
 #[cfg(target_arch = "x86_64")]
 pub mod x8 {
     #![allow(unsafe_op_in_unsafe_fn)]
-    use super::{P0, P1, P2, P3, U256, scalar_fp_mul};
+    use super::{
+        P0, P1, P2, P3, U256, scalar_fp_add, scalar_fp_mul, scalar_fp_neg, scalar_fp_sq,
+        scalar_fp_sqrt,
+    };
     use core::arch::x86_64::*;
 
     // ── Constants ─────────────────────────────────────────────────────────────
@@ -1389,6 +1392,68 @@ pub mod x8 {
         fp_mul_x8(a, a)
     }
 
+    /// Compute `a^((p+1)/4) mod p` for all 8 lanes.
+    ///
+    /// When `a` is a quadratic residue mod p, the result is a square root of `a`.
+    /// The caller must verify with `fp_sq_x8(result) == a` per lane, since this
+    /// function does not check.
+    ///
+    /// Uses a 253-squaring + 13-multiplication addition chain derived from
+    /// the binary structure of `(p+1)/4 = 2^254 - 2^30 - 244`:
+    ///   `[223 ones][0][22 ones][0000][11][00]`
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn fp_sqrt_x8(a: U256x8) -> U256x8 {
+        macro_rules! sq {
+            ($x:expr) => {
+                fp_sq_x8($x)
+            };
+        }
+        macro_rules! mul {
+            ($a:expr, $b:expr) => {
+                fp_mul_x8($a, $b)
+            };
+        }
+        macro_rules! sq_n {
+            ($x:expr, $n:literal) => {{
+                let mut t = $x;
+                for _ in 0..$n {
+                    t = fp_sq_x8(t);
+                }
+                t
+            }};
+        }
+
+        // ── Building blocks: a^(2^k − 1) ─────────────────────────────────────
+        let x2 = mul!(sq!(a), a); //  1 sq,  1 mul  → a^(2^2-1)
+        let x3 = mul!(sq!(x2), a); //  1 sq,  1 mul  → a^(2^3-1)
+        let x6 = mul!(sq_n!(x3, 3), x3); //  3 sq,  1 mul
+        let x9 = mul!(sq_n!(x6, 3), x3); //  3 sq,  1 mul
+        let x11 = mul!(sq_n!(x9, 2), x2); //  2 sq,  1 mul
+        let x22 = mul!(sq_n!(x11, 11), x11); // 11 sq,  1 mul
+        let x44 = mul!(sq_n!(x22, 22), x22); // 22 sq,  1 mul
+        let x88 = mul!(sq_n!(x44, 44), x44); // 44 sq,  1 mul
+        let x176 = mul!(sq_n!(x88, 88), x88); // 88 sq,  1 mul
+        let x220 = mul!(sq_n!(x176, 44), x44); // 44 sq,  1 mul
+        let x223 = mul!(sq_n!(x220, 3), x3); //  3 sq,  1 mul
+        // subtotal: 222 sq, 11 mul
+
+        // ── Assembly: remaining bits of exponent after x223 ───────────────────
+        // Exponent bit pattern (MSB→LSB): [223×1][0][22×1][0000][11][00]
+        let mut r = x223;
+        r = sq!(r); // bit 30 = 0       :  1 sq
+        r = mul!(sq_n!(r, 22), x22); // bits 29..8 (22×1) : 22 sq, 1 mul
+        r = sq_n!(r, 4); // bits 7..4 = 0    :  4 sq
+        r = mul!(sq_n!(r, 2), x2); // bits  3..2 (2×1)  :  2 sq, 1 mul
+        r = sq_n!(r, 2); // bits  1..0 = 0   :  2 sq
+        // assembly:  31 sq,  2 mul
+        // ─────────────────────────────────────────────────
+        // grand total: 253 sq, 13 mul
+        r
+    }
+
     // ── Internal helpers ──────────────────────────────────────────────────────
 
     /// Compute `t - p` with 5-limb borrow chain.
@@ -1542,6 +1607,48 @@ pub mod x8 {
             let got = unsafe { store(c8) };
             for lane in 0..8 {
                 assert_eq!(U256(got[lane]), expected, "fp_sq_x8 lane {lane} mismatch");
+            }
+        }
+
+        /// fp_sqrt_x8(a)^2 == a for a quadratic residue.
+        #[test]
+        fn test_fp_sqrt_x8_matches_scalar() {
+            if !check_avx512() {
+                return;
+            }
+            // Use Gx as a known QR (y = Gy satisfies y^2 = Gx^3 + 7, so Gx^3+7 is a QR).
+            let rhs_val = {
+                let gx = U256([
+                    0x59F2815B16F81798u64,
+                    0x029BFCDB2DCE28D9,
+                    0x55A06295CE870B07,
+                    0x79BE667EF9DCBBAC,
+                ]);
+                let gx3 = scalar_fp_mul(&scalar_fp_sq(&gx), &gx);
+                let b7 = U256([7, 0, 0, 0]);
+                scalar_fp_add(&gx3, &b7)
+            };
+            let expected = scalar_fp_sqrt(&rhs_val).expect("Gx^3+7 must be a QR");
+
+            let a_val = rhs_val.0;
+            let a8 = unsafe { load(&[a_val; 8]) };
+            let r8 = unsafe { fp_sqrt_x8(a8) };
+            // Verify r^2 == a in each lane.
+            let sq8 = unsafe { fp_sq_x8(r8) };
+            let got_sq = unsafe { store(sq8) };
+            let got_r = unsafe { store(r8) };
+            for lane in 0..8 {
+                assert_eq!(
+                    U256(got_sq[lane]),
+                    rhs_val,
+                    "fp_sqrt_x8: r^2 != a at lane {lane}"
+                );
+                // The vectorised result should match either root (scalar may pick opposite parity).
+                let r_u256 = U256(got_r[lane]);
+                assert!(
+                    r_u256 == expected || scalar_fp_neg(&r_u256) == expected,
+                    "fp_sqrt_x8 lane {lane}: result is neither root"
+                );
             }
         }
 
