@@ -9,6 +9,11 @@
 ///   perf report --stdio -n
 use asmcrypto::ecdsa::recover_address as recover_scalar;
 use asmcrypto::ecdsa_batch::recover_addresses_batch;
+use secp256k1::{
+    SECP256K1,
+    ecdsa::{RecoverableSignature, RecoveryId},
+};
+use sha3::Digest as _;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Standard Ethereum ecrecover precompile test vector
@@ -61,6 +66,52 @@ fn time_batch(
     );
 }
 
+fn secp256k1_recover_address(hash: &[u8; 32], r: &[u8; 32], s: &[u8; 32], v: u8) -> [u8; 20] {
+    let msg = secp256k1::Message::from_digest(*hash);
+    let recid = RecoveryId::from_i32(v as i32).expect("recovery id");
+    let mut compact = [0u8; 64];
+    compact[..32].copy_from_slice(r);
+    compact[32..].copy_from_slice(s);
+    let sig = RecoverableSignature::from_compact(&compact, recid).expect("secp256k1 sig");
+    let pk = SECP256K1
+        .recover_ecdsa(&msg, &sig)
+        .expect("secp256k1 recovery");
+    let pk_bytes = pk.serialize_uncompressed();
+    let h: [u8; 32] = sha3::Keccak256::digest(&pk_bytes[1..]).into();
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&h[12..]);
+    addr
+}
+
+fn time_secp256k1_x8(
+    label: &str,
+    n: usize,
+    hashes: [&[u8; 32]; 8],
+    rs: [&[u8; 32]; 8],
+    ss: [&[u8; 32]; 8],
+    vs: [u8; 8],
+) {
+    // Warm-up
+    for _ in 0..50 {
+        for i in 0..8 {
+            std::hint::black_box(secp256k1_recover_address(hashes[i], rs[i], ss[i], vs[i]));
+        }
+    }
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        for i in 0..8 {
+            std::hint::black_box(secp256k1_recover_address(hashes[i], rs[i], ss[i], vs[i]));
+        }
+    }
+    let elapsed = t.elapsed();
+    let ns_per_batch = elapsed.as_nanos() as f64 / n as f64;
+    let us_per_lane = ns_per_batch / 8.0 / 1_000.0;
+    let throughput = 8.0 * n as f64 / elapsed.as_secs_f64() / 1_000.0;
+    println!(
+        "{label:<40} {ns_per_batch:7.0} ns/batch  {us_per_lane:6.2} µs/lane  {throughput:8.0} krecov/s  (n={n})"
+    );
+}
+
 fn time_scalar_x8(
     label: &str,
     n: usize,
@@ -95,9 +146,11 @@ fn time_scalar_x8(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn main() {
-    // Sanity-check: verify the batch result matches the scalar result.
+    // Sanity-check: all three implementations agree on the address.
     let addr_scalar = recover_scalar(&HASH, &R, &S, V).expect("scalar ecrecover failed");
+    let addr_secp = secp256k1_recover_address(&HASH, &R, &S, V);
     let addrs_batch = recover_addresses_batch([&HASH; 8], [&R; 8], [&S; 8], [V; 8]);
+    assert_eq!(addr_secp, addr_scalar, "secp256k1 vs scalar mismatch");
     for (lane, addr) in addrs_batch.iter().enumerate() {
         assert_eq!(
             addr,
@@ -137,6 +190,16 @@ fn main() {
         [V; 8],
     );
 
+    // ── 8× secp256k1 C library + sha3 keccak ─────────────────────────────────
+    time_secp256k1_x8(
+        "secp256k1+keccak x8 (C lib, sequential)",
+        N,
+        [&HASH; 8],
+        [&R; 8],
+        [&S; 8],
+        [V; 8],
+    );
+
     println!();
 
     // ── 8 distinct hashes, same (r,s,v) — different u1,u2 per lane ───────────
@@ -164,6 +227,15 @@ fn main() {
 
     time_scalar_x8(
         "scalar x8 (varied hashes, sequential)",
+        N,
+        varied_hashes,
+        [&R; 8],
+        [&S; 8],
+        [V; 8],
+    );
+
+    time_secp256k1_x8(
+        "secp256k1+keccak x8 (varied, C lib)",
         N,
         varied_hashes,
         [&R; 8],
