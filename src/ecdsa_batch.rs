@@ -2301,7 +2301,7 @@ pub mod x8 {
     /// # Safety
     /// Requires `avx512f`, `avx512ifma`.
     #[target_feature(enable = "avx512f,avx512ifma")]
-    pub unsafe fn scalar_mul_g_x8(scalars: [U256; 8]) -> JacPtx8 {
+    pub(super) unsafe fn scalar_mul_g_x8(scalars: [U256; 8]) -> JacPtx8 {
         // ── GLV decomposition for all 8 scalars ──────────────────────────────
         let dummy_s129 = S129 {
             mag: 0,
@@ -2389,7 +2389,7 @@ pub mod x8 {
     /// # Safety
     /// Requires `avx512f`, `avx512ifma`.
     #[target_feature(enable = "avx512f,avx512ifma")]
-    pub unsafe fn scalar_mul_affine_x8(
+    pub(super) unsafe fn scalar_mul_affine_x8(
         scalars: [U256; 8],
         px_arr: [U256; 8],
         py_arr: [U256; 8],
@@ -2515,7 +2515,7 @@ pub mod x8 {
     /// # Safety
     /// Requires `avx512f`, `avx512ifma`.
     #[target_feature(enable = "avx512f,avx512ifma")]
-    pub unsafe fn to_affine_x8(p: JacPtx8) -> [(U256, U256); 8] {
+    pub(super) unsafe fn to_affine_x8(p: JacPtx8) -> [(U256, U256); 8] {
         let zs_raw = store(p.z);
         let zs: [U256; 8] = core::array::from_fn(|i| U256(zs_raw[i]));
 
