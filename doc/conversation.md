@@ -1070,3 +1070,57 @@ Q  = pt_add_x8(p1, p2)              // 8 × Jacobian addition
 **Phase 3 (unchanged):** extract last 20 bytes, zero invalid lanes.
 
 All 45 tests pass (45 passed, 0 failed).
+
+---
+
+## Prompt: "fix warnings"
+
+**Commit:** `80bf23d  fix: pub(super) on scalar_mul_g_x8/affine_x8/to_affine_x8 (U256 privacy)`
+
+The Rust compiler emitted "unreachable_pub" warnings for three functions that
+were declared `pub` inside the `ecdsa_batch` module:
+
+- `x8::scalar_mul_g_x8`
+- `x8::scalar_mul_affine_x8`
+- `x8::to_affine_x8`
+
+These are marked `pub` because `recover_addresses_avx512` lives in the parent
+module and calls them.  However, `U256` is private to `ecdsa_batch`, so the
+real effective visibility of these items is bounded by `U256` — making `pub`
+overly broad.  Changing to `pub(super)` makes the visibility match the actual
+access pattern and silences the warnings.
+
+All 45 tests still pass.
+
+---
+
+## Prompt: "add perf_ecdsa_batch.rs to time ecdsa batch recovery"
+
+**Commit:** `49c06c3  perf: add perf_ecdsa_batch.rs timing example for 8-lane batch recovery`
+
+Created `examples/perf_ecdsa_batch.rs` following the pattern of `perf_ecdsa.rs`:
+
+- Uses the standard Ethereum ecrecover precompile test vector (known-good
+  address `a94f5374fce5edbc8e2a8697c15331677e6ebf0b`).
+- Sanity-checks that `recover_addresses_batch` returns the same address on all
+  8 lanes as the scalar `recover_address` path.
+- Times four variants with N=5000 iterations each:
+  1. `recover_addresses_batch` with 8 identical lanes (same sig).
+  2. 8× scalar `asmcrypto::ecdsa::recover_address` (sequential baseline).
+  3. `recover_addresses_batch` with 8 varied hashes (same r,s,v).
+  4. 8× scalar (varied hashes, sequential baseline).
+- Reports `ns/batch`, `µs/lane`, and `krecov/s` for each variant.
+- Includes `perf record` usage comment for flamegraph profiling.
+
+Observed results on this hardware:
+
+| Variant                              | ns/batch | µs/lane | krecov/s |
+|--------------------------------------|----------|---------|----------|
+| batch x8 (same sig)                  | 213 047  | 26.6    |   38     |
+| scalar x8 (sequential)              | 421 730  | 52.7    |   19     |
+| batch x8 (varied hashes)            | 244 864  | 30.6    |   33     |
+| scalar x8 (varied hashes, seql.)    | 420 657  | 52.6    |   19     |
+
+The vectorised batch path achieves ~2× throughput over 8 sequential scalar
+calls, consistent with the expected gain from parallelising the Montgomery
+field arithmetic over 8 ZMM lanes.
