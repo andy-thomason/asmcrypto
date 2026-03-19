@@ -537,3 +537,22 @@ New functions added to `src/ecdsa_clone.rs`:
 | `ecdsa_clone` Strauss wNAF + GLV | **45 µs** | 35% faster, 16% faster than Solinas |
 
 **Build:** 21/21 tests pass, zero errors.
+
+---
+
+## 2026-03-18 — Compile-time constant evaluation: `const fn hex32 / set_b32_mod`
+
+### Prompt
+> Instead of hex32 use static constants or a const function.
+
+### High-level effects
+
+- `hex_nibble` and `hex32` converted to `const fn`; `hex32` rewrites the iterator loop as a `while` loop (iterators are not allowed in `const fn`). Uppercase hex digits (`A`–`F`) added to `hex_nibble` match arm.
+- `Fe::set_b32_mod` declared `pub const fn` (pure bit ops — already const-compatible).
+- Four runtime helper functions eliminated; replaced by module-level `const` items evaluated entirely at compile time:
+  - `fn G() -> Ge` → `const G: Ge`
+  - `fn beta_fe() -> Fe` → `const BETA: Fe`
+  - `fn order_as_fe() -> Fe` → `const ORDER_AS_FE: Fe`
+  - `fn p_minus_order() -> Fe` → `const P_MINUS_ORDER: Fe`
+- All 14 call sites updated (`G()` → `G`, `beta_fe()` → `BETA`, etc.) across `g_tables`, `ecmult`, `ecdsa_sig_recover`, and test functions.
+- **Build:** 11/11 `ecdsa_clone` tests pass, zero errors, commit `d708447`.
