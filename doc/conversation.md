@@ -556,3 +556,39 @@ New functions added to `src/ecdsa_clone.rs`:
   - `fn p_minus_order() -> Fe` → `const P_MINUS_ORDER: Fe`
 - All 14 call sites updated (`G()` → `G`, `beta_fe()` → `BETA`, etc.) across `g_tables`, `ecmult`, `ecdsa_sig_recover`, and test functions.
 - **Build:** 11/11 `ecdsa_clone` tests pass, zero errors, commit `d708447`.
+
+---
+
+## 2026-03-19 — Bernstein-Yang `modinv64` Safegcd module
+
+### Prompt
+> Implement the modinv64 in its own module. Keep the fermat versions of fe_inv and scalar_inverse_var for comparison.
+
+### High-level effects
+
+**New file `src/modinv64.rs`** (~270 lines) — standalone module, no dependencies on other crate modules:
+
+| Item | Description |
+|---|---|
+| `Signed62` | 256-bit integer as 5 × signed-62-bit limbs |
+| `ModInfo` | Modulus in signed62 + its negative inverse mod 2^62 |
+| `Trans2x2` | 2×2 transition matrix (scaled by 2^62) |
+| `normalize_62` | Bring a signed62 into [0, modulus) |
+| `divsteps_62_var` | Up to 62 variable-time Bernstein-Yang division steps |
+| `update_de_62` | Apply transition matrix to (d, e) with modular correction via i128 accumulators |
+| `update_fg_62_var` | Apply transition matrix to (f, g) for variable limb count |
+| `modinv64_var` | Full variable-time modular inverse (outer loop: until g = 0) |
+| `FE_MODINFO` | Compile-time modinfo for p = 2^256 − 2^32 − 977 |
+| `SCALAR_MODINFO` | Compile-time modinfo for n (secp256k1 group order) |
+
+C reference: `secp256k1-sys-0.11.0/.../modinv64_impl.h` (Peter Dettman).
+Differences vs. C: Rust `i128`/`u128` replace the `secp256k1_int128` helper; `u64::trailing_zeros()` replaces `ctz64_var`; constant-time variant not ported.
+
+**`src/ecdsa_clone.rs` additions:**
+- `fe_to_signed62` / `fe_from_signed62` — repack 5×52-bit Fe ↔ 5×62-bit Signed62
+- `scalar_to_signed62` / `scalar_from_signed62` — repack 4×64-bit Scalar ↔ 5×62-bit Signed62
+- `fe_inv_var` — Safegcd field inverse (Fermat `fe_inv` kept for comparison)
+- `scalar_inv_var` — Safegcd scalar inverse (Fermat `scalar_inverse_var` kept for comparison)
+- Two new tests: `test_fe_inv_var_safegcd`, `test_scalar_inv_var_safegcd` — cross-check safegcd vs. Fermat and verify a·a⁻¹ = 1
+
+**Build:** 13/13 `ecdsa_clone` tests pass, zero errors, commit `9b54dab`.
