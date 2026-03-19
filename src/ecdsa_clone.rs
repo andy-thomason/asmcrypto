@@ -1334,7 +1334,7 @@ pub fn gej_add_var(a: &Gej, b: &Gej) -> Gej {
     let mut h2 = fe_sqr(&h);
     h2 = fe_negate(&h2, 1);
     let h3 = fe_mul(&h2, &h);
-    let mut t = fe_mul(&u1, &h2);
+    let t = fe_mul(&u1, &h2);
 
     let mut x3 = fe_sqr(&i);
     fe_add(&mut x3, &h3);
@@ -1389,7 +1389,7 @@ pub fn gej_add_ge_var(a: &Gej, b: &Ge) -> Gej {
     let mut h2 = fe_sqr(&h);
     h2 = fe_negate(&h2, 1);
     let h3 = fe_mul(&h2, &h);
-    let mut t = fe_mul(&u1, &h2);
+    let t = fe_mul(&u1, &h2);
 
     let mut x3 = fe_sqr(&i);
     fe_add(&mut x3, &h3);
@@ -1871,7 +1871,7 @@ pub fn ecdsa_sig_recover(sigr: &Scalar, sigs: &Scalar, message: &Scalar, recid: 
         if fx.cmp_var(&P_MINUS_ORDER) >= 0 {
             return None;
         }
-        let mut order_fe = ORDER_AS_FE;
+        let order_fe = ORDER_AS_FE;
         fe_add(&mut fx, &order_fe);
     }
 
