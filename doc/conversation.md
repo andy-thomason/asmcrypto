@@ -1028,3 +1028,45 @@ inversions.
 - `test_scalar_mul_affine_x8_matches_scalar` — alternates G/3G base, scalars {2..9}.
 
 All 45 tests pass (45 passed, 0 failed).
+
+---
+
+## 2026-03-19 — Fully vectorise recover_addresses_avx512
+
+### Prompt
+> now finish recover_address_avx512
+
+### High-level effects
+
+`recover_addresses_avx512` is now fully vectorised over AVX-512 ZMM registers.
+
+**Before:** Phase 1 ran the entire ecrecover scalar-mul loop once per lane in
+a `for lane in 0..8` loop.  Only the final Keccak step was batched.
+
+**After:** Phase 1 is split into two sub-phases:
+
+**Phase 1a (scalar per-lane):**
+Keeps the branchy / data-dependent steps that cannot be re-cast as branchless
+vector ops without significant complexity:
+- Validate `r, s ∈ [1, n-1]`
+- Lift `r_x` to secp256k1 curve point via `scalar_fp_sqrt` (requires Tonelli-Shanks)
+- Choose `r_y` parity from recovery bit `v`
+- Compute `r⁻¹` via `scalar_fn_inv` (multi-precision addition chain)
+- Derive `u1 = −z·r⁻¹ mod n`, `u2 = s·r⁻¹ mod n`
+
+Invalid lanes are given dummy values (`u1=1, u2=2, rx=Gx, ry=Gy`) so that all
+subsequent vector ops produce valid nonzero Jacobian points (3·G).
+
+**Phase 1b (fully vectorised over ZMM):**
+```
+p1 = scalar_mul_g_x8(u1s)           // 8 × u1·G via GLV+wNAF + pt_double_x8 + pt_add_mixed_x8
+p2 = scalar_mul_affine_x8(u2s, R)   // 8 × u2·R via GLV+wNAF + pt_double_x8 + pt_add_x8
+Q  = pt_add_x8(p1, p2)              // 8 × Jacobian addition
+     [Z=0 guard: marks those lanes invalid, replaces Z with 1]
+(Qx,Qy) = to_affine_x8(Q)          // batch inversion: 21 fp_mul + 1 fp_inv
+```
+
+**Phase 2 (unchanged):** `keccak256_batch` over all 8 64-byte pubkey buffers.
+**Phase 3 (unchanged):** extract last 20 bytes, zero invalid lanes.
+
+All 45 tests pass (45 passed, 0 failed).
