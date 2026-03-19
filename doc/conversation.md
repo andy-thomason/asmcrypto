@@ -918,3 +918,52 @@ fix: remove the `sq!(x127, 129)` and start directly from `r = x127`.
 - `test_fn_inv_x8_matches_scalar` — 8 random fn_inv_x8 lanes vs scalar fn_inv.
 
 All 39 tests pass (39 passed, 0 failed).
+
+
+---
+
+## 2025 — pt_double_x8: 8-lane vectorised Jacobian point doubling
+
+### Prompt
+> do pt_double_x8 next
+
+### High-level effects
+
+**New struct `JacPtx8`** in `src/ecdsa_batch.rs`, inside the `x8` module:
+```rust
+pub struct JacPtx8 { pub x: U256x8, pub y: U256x8, pub z: U256x8 }
+```
+Represents eight parallel Jacobian points (X : Y : Z) with Z=0 encoding the
+point at infinity.
+
+**`pt_double_x8`** — implements the **dbl-2009-l** formula for secp256k1 (a=0):
+```
+A = X₁²;  B = Y₁²;  C = B²
+D = 2·((X₁+B)² − A − C)
+E = 3·A;  F = E²
+X₃ = F − 2D
+Y₃ = E·(D−X₃) − 8C
+Z₃ = 2·Y₁·Z₁
+```
+Cost: **5 field squarings + 2 field multiplications** per batch of 8 points.
+
+Why dbl-2009-l instead of cloning the scalar `pt_double`:
+- Scalar formula calls `fp_half` (branch on low bit + conditional add) —
+  not yet implemented in x8 and adds complexity.
+- dbl-2009-l uses only `fp_sq`, `fp_mul`, `fp_add`, `fp_sub` — all already
+  available as x8 primitives.
+- Infinity propagates automatically: Z₁=0 ⟹ Z₃=2·Y₁·0=0, so no per-lane
+  branch is needed.
+
+**`use super::` import list** in `x8` extended with `JacPt`, `pt_double`,
+`scalar_fp_inv`, `scalar_fp_sub` (needed by the test harness).
+
+**Test: `test_pt_double_x8_matches_scalar`**
+- Loads generator G (Gx, Gy, Z=1) into all 8 lanes of a `JacPtx8`.
+- Calls `pt_double_x8`, extracts per-lane Jacobian coordinates via `store`.
+- Converts each lane's Jacobian result to affine using `scalar_fp_inv` /
+  `scalar_fp_sq` / `scalar_fp_mul`.
+- Compares against scalar `pt_double(JacPt::from_affine(Gx,Gy)).to_affine()`.
+- Repeats for 4G = 2·(2·G) by doubling twice.
+
+All 41 tests pass (41 passed, 0 failed).
