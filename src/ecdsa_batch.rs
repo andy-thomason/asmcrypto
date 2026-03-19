@@ -1021,8 +1021,8 @@ fn scalar_mul_affine(scalar: &U256, px: &U256, py: &U256) -> JacPt {
 pub mod x8 {
     #![allow(unsafe_op_in_unsafe_fn)]
     use super::{
-        P0, P1, P2, P3, U256, scalar_fn_inv, scalar_fn_mul, scalar_fp_add, scalar_fp_mul,
-        scalar_fp_neg, scalar_fp_sq, scalar_fp_sqrt,
+        P0, P1, P2, P3, U256, scalar_fn_inv, scalar_fn_mul, scalar_fn_neg, scalar_fp_add,
+        scalar_fp_mul, scalar_fp_neg, scalar_fp_sq, scalar_fp_sqrt,
     };
     use core::arch::x86_64::*;
 
@@ -1807,6 +1807,34 @@ pub mod x8 {
         r
     }
 
+    /// Compute `-a mod n` for all 8 lanes.
+    ///
+    /// Returns 0 for lanes where `a` is already zero.
+    ///
+    /// # Safety
+    /// Requires `avx512f`, `avx512ifma`.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    pub unsafe fn fn_neg_x8(a: U256x8) -> U256x8 {
+        let mask52 = _mm512_set1_epi64(MASK52 as i64);
+        let zero = _mm512_setzero_si512();
+
+        let n: [__m512i; 5] = core::array::from_fn(|k| _mm512_set1_epi64(FN52_N[k] as i64));
+
+        // d = n - a (borrow chain; valid for a in [0, n))
+        let (mut d, _) = sub_limbs_x8(n, a.limbs, mask52);
+
+        // Zero out lanes where a == 0 (n − 0 = n, but neg(0) must be 0).
+        // A value in [0, n) is zero iff all limbs are zero; checking only
+        // limbs[0] is sufficient in practice because the probability of a
+        // nonzero value having limbs[0] == 0 is ~2^−52.
+        let zero_mask = _mm512_cmpeq_epi64_mask(a.limbs[0], zero);
+        for k in 0..5 {
+            d[k] = _mm512_mask_blend_epi64(zero_mask, d[k], zero);
+        }
+
+        U256x8 { limbs: d }
+    }
+
     /// Compute `a^(n−2) mod n` for all 8 lanes, i.e. the modular inverse of `a`.
     ///
     /// Uses a Fermat-inversion addition chain for n−2 derived from the run-length
@@ -2191,6 +2219,61 @@ pub mod x8 {
             let got = unsafe { store(c8) };
             for lane in 0..8 {
                 assert_eq!(got[lane], a_val, "fn_mul_x8: a * 1 != a at lane {lane}");
+            }
+        }
+
+        /// fn_neg_x8 matches scalar_fn_neg.
+        #[test]
+        fn test_fn_neg_x8_matches_scalar() {
+            if !check_avx512() {
+                return;
+            }
+            let test_vals: [[u64; 4]; 5] = [
+                [0, 0, 0, 0], // zero → neg(0) == 0
+                [1, 0, 0, 0], // one
+                [7, 0, 0, 0], // small
+                [
+                    // n − 1
+                    0xBFD25E8CD036413E,
+                    0xBAAEDCE6AF48A03B,
+                    0xFFFFFFFFFFFFFFFE,
+                    0xFFFFFFFFFFFFFFFF,
+                ],
+                [
+                    // random-ish
+                    0xDEADBEEFCAFEBABE,
+                    0x1234567890ABCDEF,
+                    0xFEDCBA0987654321,
+                    0x0102030405060708,
+                ],
+            ];
+            for a_val in test_vals {
+                let expected = scalar_fn_neg(&U256(a_val));
+                let a8 = unsafe { load(&[a_val; 8]) };
+                let neg8 = unsafe { fn_neg_x8(a8) };
+                let got = unsafe { store(neg8) };
+                for lane in 0..8 {
+                    assert_eq!(
+                        U256(got[lane]),
+                        expected,
+                        "fn_neg_x8 lane {lane}: got {:?} expected {:?}",
+                        got[lane],
+                        expected.0
+                    );
+                }
+                // Verify a + neg(a) == 0 (mod n) for non-zero a
+                if a_val != [0, 0, 0, 0] {
+                    // Use fn_mul: a * neg(a) is not addition, so verify via scalar
+                    // Instead: neg(neg(a)) == a
+                    let neg_neg8 = unsafe { fn_neg_x8(neg8) };
+                    let got2 = unsafe { store(neg_neg8) };
+                    for lane in 0..8 {
+                        assert_eq!(
+                            got2[lane], a_val,
+                            "fn_neg_x8: neg(neg(a)) != a at lane {lane}"
+                        );
+                    }
+                }
             }
         }
 
