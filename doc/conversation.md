@@ -751,3 +751,36 @@ New module `src/keccak_batch.rs` with `pub fn keccak256_batch(inputs: [&[u8]; 8]
 | 272 B (2 blocks) | 672 ns | 9 225 ns | 4 312 ns | **13.7×** | 6.4× |
 
 The batch speedup vs tiny-keccak grows with input length (more permutation calls per hash → more AVX-512 parallelism amortised per iteration). At 64 B (the primary Ethereum pubkey → address use case) the batch path processes 8 hashes in 258 ns — equivalent to 32 ns/hash vs 402 ns/hash for tiny-keccak.
+
+---
+
+## Prompt: "make a module ecdsa_batch that uses zmm registers to recover 8 addresses in parallel"
+
+**Commit:** `1528911` — *feat: ecdsa_batch — recover 8 Ethereum addresses in parallel (AVX-512F/BW/DQ/IFMA)*
+
+**Effect:** Created `src/ecdsa_batch.rs` with a new public function `recover_addresses_batch([&[u8;32];8], ...) -> [[u8;20];8]` that recovers 8 Ethereum addresses from 8 ECDSA signatures in one call.
+
+### Architecture
+
+The module operates in three phases:
+
+1. **EC scalar multiplication (per-lane):** Each of the 8 lanes runs `scalar_mul_g(u1)` and `scalar_mul_affine(u2, R)` using the same GLV + wNAF + Shamir algorithm as `ecdsa.rs`. At this stage operations are scalar but the 8 lanes are independent and can be scheduled by the CPU out-of-order.
+
+2. **Batch Keccak-256 (AVX-512):** After all 8 EC recoveries produce 64-byte pubkey XY buffers, a single `keccak256_batch(inputs)` call processes all 8 through the 25-ZMM vectorised permutation kernel, yielding 8 hashes simultaneously.
+
+3. **Address extraction:** Slice bytes [12..32] from each hash → 8 × 20-byte Ethereum addresses.
+
+### AVX-512 feature use
+- `avx512f,avx512bw` — batch Keccak-256 (inherited from `keccak_batch`)
+- `avx512dq` — `VPMULLQ` available for future ZMM field arithmetic layer
+- `avx512ifma` — `VPMADD52LO/HI` available for future zero-overhead 52-bit mul-add
+
+The `#[target_feature]` guard is applied to the inner `recover_addresses_avx512` function; runtime `is_x86_feature_detected!` dispatches to scalar fallback on non-AVX-512 CPUs.
+
+### Tests (4 new, all passing)
+- `test_recover_one_known_vector` — scalar kernel matches go-ethereum precompile vector
+- `test_batch_all_same_vector` — all 8 batch lanes produce correct known address
+- `test_batch_scalar_agreement` — batch output == 8×scalar for same inputs
+- `test_batch_invalid_lane_zeroed` — invalid signature → `[0u8;20]`, valid lanes unaffected
+
+**Total tests:** 30 (was 26).
