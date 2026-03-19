@@ -957,6 +957,7 @@ impl Scalar {
 }
 
 // C: $BASE/scalar_4x64_impl.h – `scalar_mul_512`  (only the non-ASM `#else` path)
+#[allow(unused_assignments)]
 fn scalar_mul_512(a: &Scalar, b: &Scalar) -> [u64; 8] {
     // 160-bit accumulator (c0, c1, c2).
     // muladd!(c, x, y) → (c0,c1,c2) += x*y
@@ -1011,6 +1012,7 @@ fn scalar_mul_512(a: &Scalar, b: &Scalar) -> [u64; 8] {
 }
 
 // C: $BASE/scalar_4x64_impl.h – `scalar_reduce_512`  (only the non-ASM `#else` path)
+#[allow(unused_assignments)]
 fn scalar_reduce_512(r: &mut Scalar, l: &[u64; 8]) {
     // Reduce 512→385 via m[0..6] = l[0..3] + l[4..7] * N_C
     macro_rules! muladd {
@@ -1046,7 +1048,7 @@ fn scalar_reduce_512(r: &mut Scalar, l: &[u64; 8]) {
 
     let (n0, n1, n2, n3) = (l[4], l[5], l[6], l[7]);
     let (mut c0, mut c1, mut c2): (u64, u64, u32) = (0, 0, 0);
-    let (mut m0, mut m1, mut m2, mut m3, mut m4, mut m5): (u64, u64, u64, u64, u64, u64);
+    let (m0, m1, m2, m3, m4, m5): (u64, u64, u64, u64, u64, u64);
     let m6: u32;
 
     c0 = l[0];
@@ -1074,7 +1076,7 @@ fn scalar_reduce_512(r: &mut Scalar, l: &[u64; 8]) {
     m6 = c0 as u32;
 
     // Reduce 385→258 via p[0..4] = m[0..3] + m[4..6] * N_C
-    let (mut p0, mut p1, mut p2, mut p3): (u64, u64, u64, u64);
+    let (p0, p1, p2, p3): (u64, u64, u64, u64);
     let p4: u32;
     c0 = m0;
     c1 = 0;
@@ -1424,7 +1426,7 @@ pub fn gej_add_var(a: &Gej, b: &Gej) -> Gej {
         }
     }
 
-    let mut rz = fe_mul(&h, &b.z);
+    let rz = fe_mul(&h, &b.z);
     let z3 = fe_mul(&a.z, &rz);
 
     let mut h2 = fe_sqr(&h);

@@ -50,7 +50,8 @@ const RC: [u64; 24] = [
 // ── AVX-512 implementation ────────────────────────────────────────────────────
 #[cfg(target_arch = "x86_64")]
 mod avx512 {
-    use super::{RATE, RC, keccak256_scalar};
+    #![allow(unsafe_op_in_unsafe_fn)]
+    use super::{RATE, RC};
     use std::arch::x86_64::*;
 
     /// 25 ZMM registers holding 8 parallel Keccak-f[1600] states.

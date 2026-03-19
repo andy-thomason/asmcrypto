@@ -195,7 +195,7 @@ fn divsteps_62_var(mut eta: i64, f0: u64, g0: u64, t: &mut Trans2x2) -> i64 {
             // w = −(f + ((f+1) & 4)*2) * g  (mod 2^min(limit,4))
             let limit = ((eta as i32) + 1).min(i) as u32;
             let m = (u64::MAX >> (64 - limit)) & 15u64;
-            let mut w = f.wrapping_add(((f.wrapping_add(1) & 4) << 1));
+            let mut w = f.wrapping_add((f.wrapping_add(1) & 4) << 1);
             w = w.wrapping_neg().wrapping_mul(g) & m;
             g = g.wrapping_add(f.wrapping_mul(w));
             q = q.wrapping_add(u.wrapping_mul(w));
