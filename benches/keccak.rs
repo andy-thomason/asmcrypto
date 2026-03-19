@@ -65,7 +65,9 @@ fn bench_keccak(c: &mut Criterion) {
 fn bench_batch_size(c: &mut Criterion, label: &str, len: usize) {
     // Build 8 distinct input buffers to avoid the branch predictor / prefetcher
     // trivially collapsing them into one.
-    let bufs: Vec<Vec<u8>> = (0..8usize).map(|i| vec![(i as u8).wrapping_add(1); len]).collect();
+    let bufs: Vec<Vec<u8>> = (0..8usize)
+        .map(|i| vec![(i as u8).wrapping_add(1); len])
+        .collect();
 
     let mut g = c.benchmark_group(format!("keccak256_batch/{label}"));
     g.throughput(Throughput::Elements(8)); // 8 hashes per iteration
