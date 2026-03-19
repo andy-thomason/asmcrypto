@@ -21,7 +21,7 @@ fn main() {
     println!();
 
     // Emit the pre_g table.
-    println!("static PRE_G_DATA: [[u64; 10]; TABLE_SIZE_G] = [");
+    println!("pub static PRE_G_DATA: [[u64; 10]; TABLE_SIZE_G] = [");
     for ge in &pre_g {
         let x = &ge.x.n;
         let y = &ge.y.n;
@@ -35,7 +35,7 @@ fn main() {
     println!();
 
     // Emit the pre_g128 table.
-    println!("static PRE_G128_DATA: [[u64; 10]; TABLE_SIZE_G] = [");
+    println!("pub static PRE_G128_DATA: [[u64; 10]; TABLE_SIZE_G] = [");
     for ge in &pre_g128 {
         let x = &ge.x.n;
         let y = &ge.y.n;
@@ -52,7 +52,7 @@ fn main() {
     println!(
         r#"/// Look up entry `n` (odd, ≠ 0) from a raw G table; negate y when n < 0.
 #[inline(always)]
-fn g_table_get_ge(data: &[[u64; 10]], n: i32) -> Ge {{
+pub fn g_table_get_ge(data: &[[u64; 10]], n: i32) -> Ge {{
     if n > 0 {{
         let d = data[((n - 1) / 2) as usize];
         Ge {{ x: Fe {{ n: [d[0], d[1], d[2], d[3], d[4]] }},

@@ -1583,11 +1583,11 @@ pub fn gej_add_ge(a: &Gej, b: &Ge) -> Gej {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Window size for Strauss wNAF — matches C's WINDOW_A.
-const WINDOW_A: usize = 5;
+pub const WINDOW_A: usize = 5;
 /// Number of table entries per A scalar: 2^(w-2) = 8 → {1,3,…,15}·P.
-const TABLE_SIZE: usize = 1 << (WINDOW_A - 2);
+pub const TABLE_SIZE: usize = 1 << (WINDOW_A - 2);
 /// Window size for the fixed-base G tables — matches C's WINDOW_G.
-const WINDOW_G: usize = 15;
+pub const WINDOW_G: usize = 15;
 /// Number of table entries for G: 2^(WINDOW_G-2) = 8192.
 pub const TABLE_SIZE_G: usize = 1 << (WINDOW_G - 2);
 
@@ -1638,7 +1638,7 @@ const G2_GLV: Scalar = Scalar {
 // β: field cube-root of unity,  β³ ≡ 1 (mod p).
 // C: $BASE/field.h  `const_beta`
 // SECP256K1_FE_CONST: 0x7ae96a2b 657c0710 6e64479e ac3434e9 9cf04975 12f58995 c1396c28 719501ee
-const BETA: Fe = Fe::set_b32_mod(&hex32(
+pub const BETA: Fe = Fe::set_b32_mod(&hex32(
     "7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee",
 ));
 
@@ -1688,7 +1688,7 @@ fn scalar_mul_shift_384(a: &Scalar, b: &Scalar) -> Scalar {
 
 /// Split `k` into `(r1, r2)` with `r1 + λ·r2 ≡ k (mod n)`, both ~128 bits.
 /// — C: $BASE/scalar_impl.h  `scalar_split_lambda`  (algorithm 3.74)
-fn scalar_split_lambda(k: &Scalar) -> (Scalar, Scalar) {
+pub fn scalar_split_lambda(k: &Scalar) -> (Scalar, Scalar) {
     let c1 = scalar_mul_shift_384(k, &G1_GLV);
     let c2 = scalar_mul_shift_384(k, &G2_GLV);
     let c1 = scalar_mul(&c1, &MINUS_B1);
@@ -1705,7 +1705,7 @@ fn scalar_split_lambda(k: &Scalar) -> (Scalar, Scalar) {
 /// Split `k` into `(lo128, hi128)`: lo128 = k mod 2¹²⁸, hi128 = k >> 128.
 /// — C: $BASE/scalar_4x64_impl.h  `scalar_split_128`
 #[inline]
-fn scalar_split_128(k: &Scalar) -> (Scalar, Scalar) {
+pub fn scalar_split_128(k: &Scalar) -> (Scalar, Scalar) {
     (
         Scalar {
             d: [k.d[0], k.d[1], 0, 0],
@@ -1722,7 +1722,7 @@ fn scalar_split_128(k: &Scalar) -> (Scalar, Scalar) {
 /// Returns `(wnaf[257], useful_length)`.
 /// Each non-zero wnaf[i] is odd and in `[-(2^(w-1)−1), 2^(w-1)−1]`.
 /// — C: $BASE/ecmult_impl.h  `ecmult_wnaf`
-fn ecmult_wnaf(s: &Scalar, w: usize) -> ([i32; 257], usize) {
+pub fn ecmult_wnaf(s: &Scalar, w: usize) -> ([i32; 257], usize) {
     let mut wnaf = [0i32; 257];
     let mut s = *s;
     let mut sign = 1i32;
@@ -1757,7 +1757,7 @@ fn ecmult_wnaf(s: &Scalar, w: usize) -> ([i32; 257], usize) {
 /// Build affine table `[P, 3P, 5P, …, (2·TABLE_SIZE−1)·P]`
 /// using one field inversion (Montgomery batch-inverse trick).
 /// — C: $BASE/ecmult_impl.h  `ecmult_odd_multiples_table` (simplified)
-fn build_odd_multiples_table(a: &Gej) -> [Ge; TABLE_SIZE] {
+pub fn build_odd_multiples_table(a: &Gej) -> [Ge; TABLE_SIZE] {
     // Compute odd multiples in Jacobian.
     let two_a = gej_double(a);
     let mut jac = [*a; TABLE_SIZE];
@@ -1863,7 +1863,7 @@ pub fn build_g_tables_vec() -> (Vec<Ge>, Vec<Ge>) {
 /// Table lookup: return the entry for odd index `n` (negate y if n < 0).
 /// — C: $BASE/ecmult_impl.h  `ecmult_table_get_ge`
 #[inline(always)]
-fn table_get_ge(pre: &[Ge], n: i32) -> Ge {
+pub fn table_get_ge(pre: &[Ge], n: i32) -> Ge {
     debug_assert!(n != 0 && (n & 1) != 0);
     if n > 0 {
         pre[((n - 1) / 2) as usize]
@@ -1880,7 +1880,7 @@ fn table_get_ge(pre: &[Ge], n: i32) -> Ge {
 /// λ-twisted table lookup: x from `aux` (= β·x of pre), y from `pre`.
 /// — C: $BASE/ecmult_impl.h  `ecmult_table_get_ge_lambda`
 #[inline(always)]
-fn table_get_ge_lambda(pre: &[Ge], aux: &[Fe], n: i32) -> Ge {
+pub fn table_get_ge_lambda(pre: &[Ge], aux: &[Fe], n: i32) -> Ge {
     debug_assert!(n != 0 && (n & 1) != 0);
     if n > 0 {
         let idx = ((n - 1) / 2) as usize;

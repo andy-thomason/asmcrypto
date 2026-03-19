@@ -2,7 +2,7 @@
 // WINDOW_G = 15, TABLE_SIZE_G = 8192
 // Do not edit.  Re-generate if WINDOW_G or G changes.
 
-static PRE_G_DATA: [[u64; 10]; TABLE_SIZE_G] = [
+pub static PRE_G_DATA: [[u64; 10]; TABLE_SIZE_G] = [
     [0x0002815b16f81798,0x000db2dce28d959f,0x000e870b07029bfc,0x000bbac55a06295c,0x000079be667ef9dc,0x0007d08ffb10d4b8,0x00048a68554199c4,0x000e1108a8fd17b4,0x000c4655da4fbfc0,0x0000483ada7726a3],
     [0x0001f113bce036f9,0x00045836f99b0860,0x00089d5229b531c8,0x000c31049344f85f,0x0000f9308a019258,0x0009fd7584b8e672,0x0009934c2231b6cb,0x000a37f3566500a9,0x000e8140fe337e62,0x0000388f7b0f632d],
     [0x0008d569b240efe4,0x000bddc619ab7cba,0x000a5c5128e88b84,0x000209355b4a7250,0x00002f8bde4d1a07,0x00087d3aa6ac62d6,0x0001bab0d6840dca,0x0006c9c426f78827,0x000e3d6d4dba9dda,0x0000d8ac222636e5],
@@ -8197,7 +8197,7 @@ static PRE_G_DATA: [[u64; 10]; TABLE_SIZE_G] = [
     [0x000fc485d2bce895,0x00064ff2662d734e,0x0009c74f973c02ff,0x0006adce5d925e0c,0x00001e70619c381a,0x000e663d668b24b3,0x000d43c579ce0bb5,0x000474aaaf80a46a,0x000ffed42935c288,0x0000c923f771f543],
 ];
 
-static PRE_G128_DATA: [[u64; 10]; TABLE_SIZE_G] = [
+pub static PRE_G128_DATA: [[u64; 10]; TABLE_SIZE_G] = [
     [0x000b444c9ec4c0da,0x00078723ea3351b7,0x00081f162ee88c56,0x0005f339239c1ad9,0x00008f68b9d2f63b,0x000cbf79501fff82,0x000fe95510bfdf23,0x0006be215dbbea2c,0x0003986de1d90c2b,0x0000662a9f2dba06],
     [0x0002b8edd23809fa,0x000b351d954be18e,0x0002451f08fd845c,0x0009f228ba93363f,0x000038381dbe2e50,0x00007518331fed52,0x000cb32d8f24dbd7,0x00020eb1cc3681fc,0x00017dcb09405a55,0x0000e4a32d0a0fb9],
     [0x0004264897c2a310,0x000a5401226303ea,0x000a4699a1f186ae,0x0002ae6f6921b82a,0x000049262724e437,0x0001b6815e27ded0,0x00012a75ff8ce0c4,0x000714303b6d1636,0x000abf95a2cfa569,0x00001337e773bca7],
@@ -16394,7 +16394,7 @@ static PRE_G128_DATA: [[u64; 10]; TABLE_SIZE_G] = [
 
 /// Look up entry `n` (odd, ≠ 0) from a raw G table; negate y when n < 0.
 #[inline(always)]
-fn g_table_get_ge(data: &[[u64; 10]], n: i32) -> Ge {
+pub fn g_table_get_ge(data: &[[u64; 10]], n: i32) -> Ge {
     if n > 0 {
         let d = data[((n - 1) / 2) as usize];
         Ge { x: Fe { n: [d[0], d[1], d[2], d[3], d[4]] },
