@@ -9,9 +9,9 @@
 //!
 //! Deviations from an exact translation:
 //!  - `fe_inv` and `scalar_inverse_var` use an addition-chain Fermat inversion
-//!    (x^(m-2) mod m) instead of the Safegcd-based `modinv64` algorithm used by
-//!    the C library, because translating modinv64_impl.h (~700 lines) is out of
-//!    scope.  The mathematical result is identical; only the performance differs.
+//!    (x^(m-2) mod m) kept for comparison.
+//!  - `fe_inv_var` and `scalar_inv_var` are the Safegcd-based (`modinv64`)
+//!    implementations that match what the C library actually uses.
 //!  - `ecmult` implements Strauss wNAF (w=5) with GLV endomorphism, matching
 //!    the C algorithm.  The precomputed G / 2¹²⁸·G tables are cached in a
 //!    `OnceLock` so the 128-doubling setup cost is paid only on the first call.
@@ -22,6 +22,7 @@
 
 #![allow(dead_code, clippy::many_single_char_names)]
 
+use crate::modinv64::{FE_MODINFO, SCALAR_MODINFO, modinv64_var};
 use std::sync::OnceLock;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -696,6 +697,59 @@ pub fn fe_inv(a: &Fe) -> Fe {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// § 1b  Field inverse via Safegcd (modinv64)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Convert a normalised field element to the signed-62 representation used by
+/// modinv64.  C: field_5x52_impl.h  `secp256k1_fe_to_signed62`
+fn fe_to_signed62(a: &Fe) -> crate::modinv64::Signed62 {
+    const M62: u64 = u64::MAX >> 2;
+    let (a0, a1, a2, a3, a4) = (a.n[0], a.n[1], a.n[2], a.n[3], a.n[4]);
+    crate::modinv64::Signed62 {
+        v: [
+            ((a0 | a1 << 52) & M62) as i64,
+            ((a1 >> 10 | a2 << 42) & M62) as i64,
+            ((a2 >> 20 | a3 << 32) & M62) as i64,
+            ((a3 >> 30 | a4 << 22) & M62) as i64,
+            (a4 >> 40) as i64,
+        ],
+    }
+}
+
+/// Convert a signed-62 value back to a field element.  The input must be in
+/// [0, p) with all limbs non-negative and < 2^62.
+/// C: field_5x52_impl.h  `secp256k1_fe_from_signed62`
+fn fe_from_signed62(a: &crate::modinv64::Signed62) -> Fe {
+    const M52: u64 = u64::MAX >> 12;
+    let (a0, a1, a2, a3, a4) = (
+        a.v[0] as u64,
+        a.v[1] as u64,
+        a.v[2] as u64,
+        a.v[3] as u64,
+        a.v[4] as u64,
+    );
+    Fe {
+        n: [
+            a0 & M52,
+            (a0 >> 52 | a1 << 10) & M52,
+            (a1 >> 42 | a2 << 20) & M52,
+            (a2 >> 32 | a3 << 30) & M52,
+            a3 >> 22 | a4 << 40,
+        ],
+    }
+}
+
+/// Modular inverse of `a` using the Safegcd (Bernstein-Yang) algorithm.
+/// Variable-time.  C: field_5x52_impl.h  `secp256k1_fe_impl_inv_var`
+pub fn fe_inv_var(a: &Fe) -> Fe {
+    let mut tmp = *a;
+    tmp.normalize();
+    let mut s = fe_to_signed62(&tmp);
+    modinv64_var(&mut s, &FE_MODINFO);
+    fe_from_signed62(&s)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // § 2  Scalar  (4 × 64-bit limbs, C: secp256k1_scalar)
 //
 //   C: $BASE/scalar_4x64_impl.h
@@ -1090,6 +1144,50 @@ pub fn scalar_inverse_var(x: &Scalar) -> Scalar {
         }
     }
     r
+}
+
+/// Convert a scalar to the signed-62 representation.
+/// C: scalar_4x64_impl.h  `secp256k1_scalar_to_signed62`
+fn scalar_to_signed62(a: &Scalar) -> crate::modinv64::Signed62 {
+    const M62: u64 = u64::MAX >> 2;
+    let (a0, a1, a2, a3) = (a.d[0], a.d[1], a.d[2], a.d[3]);
+    crate::modinv64::Signed62 {
+        v: [
+            (a0 & M62) as i64,
+            ((a0 >> 62 | a1 << 2) & M62) as i64,
+            ((a1 >> 60 | a2 << 4) & M62) as i64,
+            ((a2 >> 58 | a3 << 6) & M62) as i64,
+            (a3 >> 56) as i64,
+        ],
+    }
+}
+
+/// Convert a signed-62 value back to a scalar.  Input must be in [0, n).
+/// C: scalar_4x64_impl.h  `secp256k1_scalar_from_signed62`
+fn scalar_from_signed62(a: &crate::modinv64::Signed62) -> Scalar {
+    let (a0, a1, a2, a3, a4) = (
+        a.v[0] as u64,
+        a.v[1] as u64,
+        a.v[2] as u64,
+        a.v[3] as u64,
+        a.v[4] as u64,
+    );
+    Scalar {
+        d: [
+            a0 | a1 << 62,
+            a1 >> 2 | a2 << 60,
+            a2 >> 4 | a3 << 58,
+            a3 >> 6 | a4 << 56,
+        ],
+    }
+}
+
+/// Modular inverse of `x` mod n using the Safegcd (Bernstein-Yang) algorithm.
+/// Variable-time.  C: scalar_4x64_impl.h  `secp256k1_scalar_inverse_var`
+pub fn scalar_inv_var(x: &Scalar) -> Scalar {
+    let mut s = scalar_to_signed62(x);
+    modinv64_var(&mut s, &SCALAR_MODINFO);
+    scalar_from_signed62(&s)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2079,5 +2177,45 @@ mod debug_tests {
         };
         let product = scalar_mul(&n_minus_1, &n_minus_1);
         assert_eq!(product.d, [1, 0, 0, 0], "(n-1)^2 mod n should be 1");
+    }
+
+    #[test]
+    fn test_fe_inv_var_safegcd() {
+        // fe_inv_var (safegcd) must agree with fe_inv (Fermat) on G.x.
+        let g = G;
+        let inv_fermat = fe_inv(&g.x);
+        let inv_safegcd = fe_inv_var(&g.x);
+        let mut a = inv_fermat;
+        a.normalize();
+        let mut b = inv_safegcd;
+        b.normalize();
+        assert_eq!(a.n, b.n, "fe_inv_var != fe_inv on G.x");
+        // Also verify a * inv_safegcd == 1.
+        let mut prod = fe_mul(&g.x, &inv_safegcd);
+        prod.normalize();
+        assert_eq!(prod.n, [1, 0, 0, 0, 0], "G.x * fe_inv_var(G.x) != 1");
+    }
+
+    #[test]
+    fn test_scalar_inv_var_safegcd() {
+        // scalar_inv_var (safegcd) must agree with scalar_inverse_var (Fermat).
+        // Use the k value from the standard ecrecover test vector.
+        let k = Scalar {
+            d: [
+                0x4402_DA17_22FC_9BAEu64,
+                0x1455_1231_950B_75FCu64,
+                0x0000_0000_0000_0001u64,
+                0u64,
+            ],
+        };
+        let inv_fermat = scalar_inverse_var(&k);
+        let inv_safegcd = scalar_inv_var(&k);
+        assert_eq!(
+            inv_fermat.d, inv_safegcd.d,
+            "scalar_inv_var != scalar_inverse_var"
+        );
+        // k * inv == 1 mod n
+        let product = scalar_mul(&k, &inv_safegcd);
+        assert_eq!(product.d, [1, 0, 0, 0], "k * scalar_inv_var(k) != 1 mod n");
     }
 }

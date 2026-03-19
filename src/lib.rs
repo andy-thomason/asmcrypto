@@ -8,3 +8,4 @@
 pub mod ecdsa;
 pub mod ecdsa_clone;
 pub mod keccak;
+pub mod modinv64;
