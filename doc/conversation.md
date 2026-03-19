@@ -805,3 +805,45 @@ The `#[target_feature]` guard is applied to the inner `recover_addresses_avx512`
 only vectorises the final Keccak step; the EC scalar-mul still runs 8 independent scalar
 loops.  Fully vectorising the field arithmetic over ZMM registers (8 parallel U256 limb-lanes
 using VPMULLQ + VPMADD52) is the next required step to close the gap.
+
+## Session: vectorised fp_mul_x8 using AVX-512IFMA (commit d3297af)
+
+**Prompt:** Start with a vector version of scalar_fp_mul. Write a perf example to time it.
+
+**New module: `src/ecdsa_batch.rs` — `pub mod x8`**
+
+Type `U256x8`: 8 parallel secp256k1 Fp elements stored as 5 × 52-bit limbs.
+Each `__m512i` limbs[k] holds bit-field [52k..52(k+1)) of all 8 values simultaneously.
+
+Exported functions (all `pub unsafe fn`, require `avx512f,avx512ifma`):
+- `load(vals: &[[u64;4];8]) -> U256x8` / `store(a: U256x8) -> [[u64;4];8]`
+- `fp_add_x8`, `fp_sub_x8`, `fp_neg_x8`
+- `fp_mul_x8(a, b) -> U256x8` — 50 VPMADD52 intrinsics (schoolbook 5×5)
+- `fp_sq_x8(a) -> U256x8`
+
+**Algorithm for fp_mul_x8:**
+1. Schoolbook 5×5 multiply: 25 × (madd52lo + madd52hi) = 50 VPMADD52 instructions.
+2. Carry propagation (k=0..8) normalising to 52-bit limbs.
+3. Solinas fold: 2^256 ≡ K=2^32+977, fold multiplier 16K≈2^37 fits in 37 bits.
+   - Fold t[5..8] using 2 VPMADD52 per excess limb (lo→position k-5, hi→k-4).
+   - Cascade-fold t[9]'s hi residual (would land at position 5) back to positions 0,1.
+   - Key bug caught: VPMADD52 only uses low 52 bits of operands; initial code silently
+     dropped the hi part of t[9]*16K (≈2^34 residual). Fixed by explicit cascade fold.
+4. Second carry propagation + tiny Solinas pass for carry out of limb 4.
+5. Per-lane conditional subtract: 5-limb borrow chain → `_mm512_mask_blend_epi64`.
+
+5 tests added (round-trip, fp_mul matches scalar, fp_sq, a+(-a)=0, a*1=a).
+
+**New file: `examples/perf_fp_mul.rs`**
+
+**Results (release build, 500k iterations, chained multiplies):**
+
+| | Total (8 muls) | Per mul |
+|---|---|---|
+| 8 × scalar fp_mul | 64.1 ns | 8.0 ns |
+| fp_mul_x8 (8-wide) | 31.0 ns | 3.9 ns |
+| **Speedup** | **2.06×** | |
+
+The 2× speedup over sequential scalar is from the SIMD instruction-level parallelism.
+Full throughput benefit requires the wNAF scalar-mul loop to also be vectorised.
+
