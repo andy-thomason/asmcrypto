@@ -12,7 +12,7 @@ This current version is targeted towards the Zen 5 architecture of 2026-era AMD 
 contact us (Atomic Increment) for implementations on other hardware such as ARM SVE or legacy
 x86_64 or to implement other cryptographic algorithms.
 
-See the `asmjson` crate for what is probably the fastest current implementation of JSON
+See the [`asmjson`](https://github.com/atomicincrement/asmjson) crate for what is probably the fastest current implementation of JSON
 decoding.
 
 Note that performance will be terrible if you run this on legacy hardware!
@@ -99,7 +99,7 @@ to a correct scalar implementation.
 
 ### Batch ECDSA address recovery
 
-```rust
+```rust,ignore
 use asmcrypto::ecdsa_batch::recover_addresses_batch;
 
 let addresses: [[u8; 20]; 8] = recover_addresses_batch(
@@ -115,7 +115,7 @@ runnable example.
 
 ### Batch Keccak-256
 
-```rust
+```rust,ignore
 use asmcrypto::keccak_batch::keccak256_batch;
 
 let hashes: [[u8; 32]; 8] = keccak256_batch([

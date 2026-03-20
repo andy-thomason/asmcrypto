@@ -486,7 +486,7 @@ fn scalar_fp_half(a: &U256) -> U256 {
             (s.0[0] >> 1) | (s.0[1] << 63),
             (s.0[1] >> 1) | (s.0[2] << 63),
             (s.0[2] >> 1) | (s.0[3] << 63),
-            (s.0[3] >> 1) | ((c as u64) << 63),
+            (s.0[3] >> 1) | (c << 63),
         ])
     }
 }
@@ -686,6 +686,7 @@ impl JacPt {
         self.z.is_zero()
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn to_affine(&self) -> Option<(U256, U256)> {
         if self.is_infinity() {
             return None;
@@ -1995,8 +1996,7 @@ pub mod x8 {
         let r = mul!(r, x1); // run 1
         let r = sq!(r, 2);
         let r = sq!(r, 6);
-        let r = mul!(r, x6); // run 6
-        r
+        mul!(r, x6) // run 6
     }
 
     // ── Jacobian point (8 lanes) ──────────────────────────────────────────────

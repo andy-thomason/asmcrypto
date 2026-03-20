@@ -672,7 +672,7 @@ fn fp_half(a: &U256) -> U256 {
             (s.0[0] >> 1) | (s.0[1] << 63),
             (s.0[1] >> 1) | (s.0[2] << 63),
             (s.0[2] >> 1) | (s.0[3] << 63),
-            (s.0[3] >> 1) | ((c as u64) << 63),
+            (s.0[3] >> 1) | (c << 63),
         ])
     }
 }
@@ -910,6 +910,7 @@ impl JacobianPoint {
     }
 
     /// Convert back to affine coordinates.  Returns `None` for the point at infinity.
+    #[allow(clippy::wrong_self_convention)]
     fn to_affine(&self) -> Option<(U256, U256)> {
         if self.is_infinity() {
             return None;

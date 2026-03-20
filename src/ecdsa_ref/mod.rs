@@ -183,7 +183,7 @@ impl Fe {
         let t3 = t3 + (t2 >> 52);
         let t2 = t2 & M52;
         let m = m & t2;
-        t4 = t4 + (t3 >> 52);
+        t4 += t3 >> 52;
         let t3 = t3 & M52;
         let m = m & t3;
         let x = (t4 >> 48)
@@ -468,7 +468,7 @@ pub fn fe_sqr_inner(r: &mut [u64; 5], a: &[u64; 5]) {
     r[0] = (c as u64) & M52;
     c >>= 52;
 
-    a3 = (a[3]) as u64; // restore (a3 wasn't mutated)
+    a3 = a[3]; // restore (a3 wasn't mutated)
     let a0d = a0 * 2;
     c += a0d as u128 * a1 as u128;
     d += a2 as u128 * a4 as u128 + a3 as u128 * a3 as u128;
@@ -1051,7 +1051,6 @@ fn scalar_reduce_512(r: &mut Scalar, l: &[u64; 8]) {
     let (n0, n1, n2, n3) = (l[4], l[5], l[6], l[7]);
     let (mut c0, mut c1, mut c2): (u64, u64, u32) = (0, 0, 0);
     let (m0, m1, m2, m3, m4, m5): (u64, u64, u64, u64, u64, u64);
-    let m6: u32;
 
     c0 = l[0];
     muladd!(c0, c1, c2, n0, N_C_0);
@@ -1075,11 +1074,10 @@ fn scalar_reduce_512(r: &mut Scalar, l: &[u64; 8]) {
     extract!(m4, c0, c1, c2);
     sumadd!(c0, c1, c2, n3);
     extract!(m5, c0, c1, c2);
-    m6 = c0 as u32;
+    let m6: u32 = c0 as u32;
 
     // Reduce 385→258 via p[0..4] = m[0..3] + m[4..6] * N_C
     let (p0, p1, p2, p3): (u64, u64, u64, u64);
-    let p4: u32;
     c0 = m0;
     c1 = 0;
     c2 = 0;
@@ -1098,7 +1096,7 @@ fn scalar_reduce_512(r: &mut Scalar, l: &[u64; 8]) {
     muladd!(c0, c1, c2, m6 as u64, N_C_1);
     sumadd!(c0, c1, c2, m5);
     extract!(p3, c0, c1, c2);
-    p4 = (c0 as u32).wrapping_add(m6);
+    let p4: u32 = (c0 as u32).wrapping_add(m6);
 
     // Reduce 258→256: r[0..3] = p[0..3] + p4 * N_C
     let mut t = p0 as u128 + p4 as u128 * N_C_0 as u128;

@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![allow(clippy::needless_range_loop)]
 
 #[doc(hidden)]
 pub mod ecdsa_batch;
