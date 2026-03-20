@@ -335,6 +335,9 @@ mod avx512 {
         let min_len = inputs.iter().map(|s| s.len()).min().unwrap_or(0);
         let shared_full_blocks = min_len / RATE;
 
+        // TODO: Consider using masks to handle dissimilar lengths without falling back to scalar.
+        // Use kmov to load partial vectors of bytes.
+
         for b in 0..shared_full_blocks {
             let off = b * RATE;
             absorb_block(

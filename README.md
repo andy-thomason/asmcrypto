@@ -6,7 +6,18 @@
 [![license](https://img.shields.io/crates/l/asmcrypto.svg)](LICENSE-MIT)
 
 Register-parallel cryptographic primitives for Ethereum node infrastructure,
-written in Rust with AVX-512 intrinsics.
+written in Rust with AVX-512 intrinsics, especially AVX-512 IFMA.
+
+This current version is targeted towards the Zen 5 architecture of 2026-era AMD cpus
+contact us (Atomic Increment) for implementations on other hardware such as ARM SVE or legacy
+x86_64 or to implement other cryptographic algorithms.
+
+See the `asmjson` crate for what is probably the fastest current implementation of JSON
+decoding.
+
+Note that performance will be terrible if you run this on legacy hardware!
+Many AWS instances support AVX-512 IFMA but virtualisation costs often are very high
+on cloud hardware.
 
 ## What is this?
 
@@ -25,7 +36,8 @@ Two core APIs are provided:
 
 ## Performance
 
-> Benchmarks run on a single core (Zen 4 / AVX-512, `RUSTFLAGS="-C target-cpu=native"`).
+> Benchmarks run on a single core (Zen 5 / AVX-512, `RUSTFLAGS="-C target-cpu=native"`).
+> Minisform A2 Mini PC AMD 9955HX.
 
 ### ECDSA batch address recovery (8 lanes)
 
@@ -115,8 +127,6 @@ runnable example.
 
 ```bash
 RUSTFLAGS="-C target-cpu=native" cargo bench
-RUSTFLAGS="-C target-cpu=native" cargo run --example perf_ecdsa_batch --release
-RUSTFLAGS="-C target-cpu=native" cargo run --example perf_keccak_batch --release
 ```
 
 ## Requirements
@@ -140,3 +150,13 @@ Licensed under either of
  * MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+## Warning
+
+**Do not use this crate in production.**
+This is experimental research code intended for benchmarking and algorithmic
+exploration. It has not been audited for security, may contain bugs, and its
+API is subject to breaking changes without notice. Use a well-audited library
+such as [k256](https://crates.io/crates/k256) or
+[libsecp256k1](https://crates.io/crates/secp256k1) for any production or
+security-sensitive workload.

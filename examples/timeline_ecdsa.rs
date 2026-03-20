@@ -1,10 +1,10 @@
-//! RDTSC-based execution timeline for ecdsa_clone::recover_address.
+//! RDTSC-based execution timeline for ecdsa_ref::recover_address.
 //!
 //! Breaks the hot path into labelled phases and reports median cycle costs.
 //! Usage:
 //!   cargo run --example timeline_ecdsa --release
 
-use asmcrypto::ecdsa_clone::{
+use asmcrypto::ecdsa_ref::{
     BETA, Fe, Gej, PRE_G_DATA, PRE_G128_DATA, Scalar, TABLE_SIZE, WINDOW_A, WINDOW_G,
     build_odd_multiples_table, ecmult, ecmult_wnaf, fe_mul, g_table_get_ge, ge_set_gej_var,
     ge_set_xo_var, gej_add_ge_var, gej_double, scalar_inv_var, scalar_mul, scalar_split_128,
@@ -76,7 +76,7 @@ fn main() {
 
     // ── Warm-up pass ──────────────────────────────────────────────────────
     for _ in 0..500 {
-        let _ = asmcrypto::ecdsa_clone::recover_address(&hash, &{
+        let _ = asmcrypto::ecdsa_ref::recover_address(&hash, &{
             let mut sig65 = [0u8; 65];
             sig65[0..32].copy_from_slice(&r);
             sig65[32..64].copy_from_slice(&s);
@@ -242,7 +242,7 @@ fn main() {
     };
     let s_total = measure(
         || {
-            let _ = asmcrypto::ecdsa_clone::recover_address(&hash, &sig65);
+            let _ = asmcrypto::ecdsa_ref::recover_address(&hash, &sig65);
         },
         n,
     );

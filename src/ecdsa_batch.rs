@@ -3294,6 +3294,9 @@ impl U256 {
 //
 //   Phase 3 (scalar): extract 20-byte address from hash; zero invalid lanes.
 
+// TODO: Consider using the table from the scalar implementation to accelerate the expensive multiply.
+// The table would likely need to be transposed so that we can use gather instructions.
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512dq,avx512ifma")]
 unsafe fn recover_addresses_avx512(

@@ -1,10 +1,10 @@
-//! Exact Rust translation of the secp256k1 C library.
+//! Exact Rust translation of the secp256k1 C library for refrence.
 //!
 //! Each function carries a `// C:` comment giving the absolute path on this
 //! machine to the C source that was translated.
 //!
 //! C source base:
-//!   /home/amy/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/secp256k1-sys-0.10.1/depend/secp256k1/src/
+//!   https://github.com/rust-bitcoin/rust-secp256k1/tree/secp256k1-sys-0.10.1/secp256k1-sys/depend/secp256k1/src/
 //! (abbreviated below as `$BASE`)
 //!
 //! Deviations from an exact translation:
@@ -15,13 +15,15 @@
 //!  - `ecmult` uses WINDOW_A=5 for variable-base A and WINDOW_G=15 for the
 //!    fixed-base G tables, matching the C library.  The G / 2¹²⁸·G tables
 //!    (TABLE_SIZE_G = 8192 entries each) are stored as compile-time statics in
-//!    `g_tables_generated.rs` (regenerate with `gen_g_tables`).
+//!    `g_tables_generated.rs` (regenerate with `gen_g_tables`, output to `src/ecdsa_ref/`).
 //!  - VERIFY_CHECK / VERIFY_BITS / magnitude tracking are omitted (they are
 //!    debug-only assertions in the C library).
 
 #![allow(dead_code, clippy::many_single_char_names)]
 
-use crate::modinv64::{FE_MODINFO, SCALAR_MODINFO, modinv64_var};
+mod modinv64;
+
+use modinv64::{FE_MODINFO, SCALAR_MODINFO, modinv64_var};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // § 1  Field element  (5 × 52-bit limbs, C: secp256k1_fe)
@@ -700,10 +702,10 @@ pub fn fe_inv(a: &Fe) -> Fe {
 
 /// Convert a normalised field element to the signed-62 representation used by
 /// modinv64.  C: field_5x52_impl.h  `secp256k1_fe_to_signed62`
-fn fe_to_signed62(a: &Fe) -> crate::modinv64::Signed62 {
+fn fe_to_signed62(a: &Fe) -> modinv64::Signed62 {
     const M62: u64 = u64::MAX >> 2;
     let (a0, a1, a2, a3, a4) = (a.n[0], a.n[1], a.n[2], a.n[3], a.n[4]);
-    crate::modinv64::Signed62 {
+    modinv64::Signed62 {
         v: [
             ((a0 | a1 << 52) & M62) as i64,
             ((a1 >> 10 | a2 << 42) & M62) as i64,
@@ -717,7 +719,7 @@ fn fe_to_signed62(a: &Fe) -> crate::modinv64::Signed62 {
 /// Convert a signed-62 value back to a field element.  The input must be in
 /// [0, p) with all limbs non-negative and < 2^62.
 /// C: field_5x52_impl.h  `secp256k1_fe_from_signed62`
-fn fe_from_signed62(a: &crate::modinv64::Signed62) -> Fe {
+fn fe_from_signed62(a: &modinv64::Signed62) -> Fe {
     const M52: u64 = u64::MAX >> 12;
     let (a0, a1, a2, a3, a4) = (
         a.v[0] as u64,
@@ -1148,10 +1150,10 @@ pub fn scalar_inverse_var(x: &Scalar) -> Scalar {
 
 /// Convert a scalar to the signed-62 representation.
 /// C: scalar_4x64_impl.h  `secp256k1_scalar_to_signed62`
-fn scalar_to_signed62(a: &Scalar) -> crate::modinv64::Signed62 {
+fn scalar_to_signed62(a: &Scalar) -> modinv64::Signed62 {
     const M62: u64 = u64::MAX >> 2;
     let (a0, a1, a2, a3) = (a.d[0], a.d[1], a.d[2], a.d[3]);
-    crate::modinv64::Signed62 {
+    modinv64::Signed62 {
         v: [
             (a0 & M62) as i64,
             ((a0 >> 62 | a1 << 2) & M62) as i64,
@@ -1164,7 +1166,7 @@ fn scalar_to_signed62(a: &Scalar) -> crate::modinv64::Signed62 {
 
 /// Convert a signed-62 value back to a scalar.  Input must be in [0, n).
 /// C: scalar_4x64_impl.h  `secp256k1_scalar_from_signed62`
-fn scalar_from_signed62(a: &crate::modinv64::Signed62) -> Scalar {
+fn scalar_from_signed62(a: &modinv64::Signed62) -> Scalar {
     let (a0, a1, a2, a3, a4) = (
         a.v[0] as u64,
         a.v[1] as u64,
@@ -1594,7 +1596,7 @@ pub const WINDOW_G: usize = 15;
 pub const TABLE_SIZE_G: usize = 1 << (WINDOW_G - 2);
 
 // Static G table data (PRE_G_DATA, PRE_G128_DATA, g_table_get_ge).
-// Regenerate with: cargo run --example gen_g_tables --release > src/g_tables_generated.rs
+// Regenerate with: cargo run --example gen_g_tables --release > src/ecdsa_ref/g_tables_generated.rs
 include!("g_tables_generated.rs");
 
 // ── GLV constants ─────────────────────────────────────────────────────────────

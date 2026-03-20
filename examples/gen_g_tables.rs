@@ -1,14 +1,14 @@
-//! Code generator: emit `src/g_tables_generated.rs` with static G table data.
+//! Code generator: emit `src/ecdsa_ref/g_tables_generated.rs` with static G table data.
 //!
 //! Run:
-//!   cargo run --example gen_g_tables --release > src/g_tables_generated.rs
+//!   cargo run --example gen_g_tables --release > src/ecdsa_ref/g_tables_generated.rs
 //!
-//! The generated file is `include!`d inside `ecdsa_clone.rs` and provides
+//! The generated file is `include!`d inside `ecdsa_ref/mod.rs` and provides
 //! `PRE_G_DATA` and `PRE_G128_DATA` as compile-time statics, replacing the
 //! runtime OnceLock approach.  Each entry stores the 5×52-bit limbs for x
 //! and y packed as `[u64; 10]`; all table entries have `infinity = false`.
 
-use asmcrypto::ecdsa_clone::{TABLE_SIZE_G, build_g_tables_vec};
+use asmcrypto::ecdsa_ref::{TABLE_SIZE_G, build_g_tables_vec};
 
 fn main() {
     let (pre_g, pre_g128) = build_g_tables_vec();
@@ -48,7 +48,7 @@ fn main() {
     println!("];");
     println!();
 
-    // Emit the lookup helper (included inside ecdsa_clone so Ge/Fe are in scope).
+    // Emit the lookup helper (included inside ecdsa_ref so Ge/Fe are in scope).
     println!(
         r#"/// Look up entry `n` (odd, ≠ 0) from a raw G table; negate y when n < 0.
 #[inline(always)]

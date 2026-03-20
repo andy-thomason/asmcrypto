@@ -416,7 +416,7 @@ pub fn modinv64_var(x: &mut Signed62, modinfo: &ModInfo) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // § 4  Modinfo constants and conversion helpers for Fe and Scalar
-//      (Inline here to keep the ecdsa_clone module's public surface clean.)
+//      (Inline here to keep the ecdsa_ref module's public surface clean.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── 4a  Field element (secp256k1 prime p) ────────────────────────────────────
