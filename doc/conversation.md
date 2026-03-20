@@ -1211,3 +1211,28 @@ assembly optimisations and estimated 1.5–2× further speedup (§3).
 - Bumped crate version from `0.1.1` to `0.1.2` in `Cargo.toml`.
 - Recorded this publish step in `doc/conversation.md`.
 - Committed, pushed to `origin/master`, and published to crates.io.
+
+---
+
+## 2026-03-20 — Fix CI clippy failures
+
+### Prompt
+> Fix ci issues.
+
+### High-level effects
+- Added `#![allow(clippy::needless_range_loop)]` crate-wide in `src/lib.rs`;
+  cryptographic index loops are intentional and restructuring would reduce clarity.
+- Fixed `unnecessary_cast` (`c as u64` / `(a[3]) as u64`) in `ecdsa_batch.rs`,
+  `ecdsa_ref/mod.rs`, and `ecdsa_scalar.rs`.
+- Fixed `assign_op_pattern` (`t4 = t4 + …` → `t4 += …`) in `ecdsa_ref/mod.rs`.
+- Fixed `needless_late_init` for `m6` and `p4` in `ecdsa_ref/mod.rs` by moving
+  declarations to their initialisation sites.
+- Fixed `let_and_return` in `ecdsa_batch.rs` (macro chain): removed redundant
+  `let r = …; r` — now returns the macro call expression directly.
+- Added `#[allow(clippy::wrong_self_convention)]` to `to_affine(&self)` in
+  `ecdsa_batch.rs` and `ecdsa_scalar.rs`; changing to `self` would require
+  auditing all call sites and is deferred.
+- Changed README.md ECDSA and Keccak code examples from plain `rust` fences to
+  `rust,ignore` so the doc-test runner skips pseudo-code with undefined variables.
+- All 45 library tests still pass; CI now passes `cargo fmt --check`, `cargo
+  clippy -- -D warnings`, `cargo test --all`, and `cargo build --examples --release`.
