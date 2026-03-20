@@ -15,7 +15,7 @@
 //! if streams diverge in block count (different lengths), the module extracts
 //! per-stream scalar states and finishes them with the reference implementation.
 
-use crate::keccak::keccak256 as keccak256_scalar;
+use crate::keccak_scalar::keccak256 as keccak256_scalar;
 
 const RATE: usize = 136; // bytes absorbed per permutation
 
@@ -418,7 +418,7 @@ pub fn keccak256_batch(inputs: [&[u8]; 8]) -> [[u8; 32]; 8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keccak::keccak256 as keccak256_scalar;
+    use crate::keccak_scalar::keccak256 as keccak256_scalar;
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()

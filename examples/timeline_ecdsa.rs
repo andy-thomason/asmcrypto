@@ -227,7 +227,7 @@ fn main() {
     buf[32..64].copy_from_slice(&py.get_b32());
     let s9 = measure(
         || {
-            let _ = asmcrypto::keccak::keccak256(&buf);
+            let _ = asmcrypto::keccak_scalar::keccak256(&buf);
         },
         n,
     );

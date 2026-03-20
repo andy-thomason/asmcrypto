@@ -1,4 +1,4 @@
-use asmcrypto::keccak::keccak256 as our_keccak256;
+use asmcrypto::keccak_scalar::keccak256 as our_keccak256;
 use asmcrypto::keccak_batch::keccak256_batch;
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use sha3::Digest as _;

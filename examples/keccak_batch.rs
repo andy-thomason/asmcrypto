@@ -35,7 +35,7 @@ fn main() {
     }
 
     // Cross-check one lane against the scalar implementation.
-    let scalar = asmcrypto::keccak::keccak256(messages[0]);
+    let scalar = asmcrypto::keccak_scalar::keccak256(messages[0]);
     assert_eq!(
         hashes[0], scalar,
         "batch lane 0 must match scalar keccak256"

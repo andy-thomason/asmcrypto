@@ -1,4 +1,4 @@
-use asmcrypto::ecdsa::{bench_fn_mul, bench_fp_mul, bench_mul_wide};
+use asmcrypto::ecdsa_scalar::{bench_fn_mul, bench_fp_mul, bench_mul_wide};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // Two non-trivial 256-bit operands (secp256k1 field prime - 1 and group order).

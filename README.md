@@ -78,6 +78,12 @@ A 1.5–2× additional speedup is achievable, which would push throughput well
 above 100 krecov/s per core and past the 50 000 TPS threshold for a
 single-threaded validator.
 
+The reference implementation also uses a large lookup table to accelerate
+the field multiply (Strauss wNAF with GLV endomorphism). We could use vector
+gather instructions to implement this table to improve this step.
+
+It should be possible to get close to the 8× speedup that is theoretically achievable.
+
 ## Usage
 
 Add to your `Cargo.toml`:

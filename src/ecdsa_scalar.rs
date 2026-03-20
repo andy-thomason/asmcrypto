@@ -5,7 +5,7 @@
 //!
 //! All arithmetic is implemented from scratch — no external crates are used.
 
-use crate::keccak::keccak256;
+use crate::keccak_scalar::keccak256;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // secp256k1 domain parameters

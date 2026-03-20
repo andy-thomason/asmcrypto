@@ -3254,7 +3254,7 @@ fn recover_one(hash: &[u8; 32], r: &[u8; 32], s: &[u8; 32], v: u8) -> [u8; 20] {
     let mut pubkey_xy = [0u8; 64];
     pubkey_xy[0..32].copy_from_slice(&qx.to_be_bytes());
     pubkey_xy[32..64].copy_from_slice(&qy.to_be_bytes());
-    let h = crate::keccak::keccak256(&pubkey_xy);
+    let h = crate::keccak_scalar::keccak256(&pubkey_xy);
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&h[12..]);
     addr

@@ -2064,7 +2064,7 @@ pub fn recover_address(msg_hash: &[u8; 32], sig65: &[u8; 65]) -> Option<[u8; 20]
     buf[32..64].copy_from_slice(&py.get_b32());
 
     // Keccak-256 of the 64-byte pubkey, then take last 20 bytes.
-    let hash = crate::keccak::keccak256(&buf);
+    let hash = crate::keccak_scalar::keccak256(&buf);
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&hash[12..32]);
     Some(addr)
